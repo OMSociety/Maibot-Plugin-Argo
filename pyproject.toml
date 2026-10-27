@@ -1,0 +1,9 @@
+[tool.ruff]
+# 与仓库现有代码的行宽保持一致；只作开发期工具配置，不参与插件打包。
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

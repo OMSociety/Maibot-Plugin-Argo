@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "omsociety.argo-lookup",
   "version": "1.0.0",
-  "name": "argo 检索",
+  "name": "Argo 检索",
   "description": "把本机 argo 的检索与长任务能力交给麦麦：按问题类型选源（中文综合、时事、中文期刊题录、社科全文、外文文献、DOI 全文、书目、配图、GitHub），长任务提交即返回、稍后取结果",
   "author": {
     "name": "OMSociety",
@@ -29,9 +29,7 @@
       "background": "#FDC27D"
     }
   },
-  "capabilities": [
-    "send.text"
-  ],
+  "capabilities": [],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [

@@ -40,6 +40,11 @@ _CACHE_TTL = 300.0
 _CACHE_MAX = 128
 
 
+def fail(message: str) -> dict:
+    """失败结果。宿主取 ``error`` 当错误信息、``content`` 当可见文本，两个字段都填。"""
+    return {"success": False, "error": message, "content": message}
+
+
 class PluginSection(PluginConfigBase):
     """插件总开关。"""
 
@@ -76,9 +81,11 @@ class ArgoSection(PluginConfigBase):
         json_schema_extra={"label": "密钥文件", "hint": "留空走默认位置"},
     )
     mode: str = Field(
-        default="fast",
-        description="检索模式：fast / balanced / deep",
-        json_schema_extra={"label": "检索模式"},
+        default=argo_cli.DEFAULT_MODE,
+        description=(
+            "检索模式：fast（免费优先）/ auto（成本感知）/ deep（质量优先）/ budget（配额控制）"
+        ),
+        json_schema_extra={"label": "检索模式", "hint": "写错时按 fast 处理"},
     )
     timeout_seconds: int = Field(
         default=25,
@@ -142,16 +149,8 @@ class ArgoLookupConfig(PluginConfigBase):
     jobs: JobsSection = Field(default_factory=JobsSection)
 
 
-_KIND_HINT = (
-    "web=中文综合（游戏影视对比、热梗、娱乐热点、中文新闻综述都走它）；"
-    "news=时事新闻（带发布日期与权威分级）；"
-    "academic_cn=中文期刊题录（万方/维普）；"
-    "fulltext_cn=国家哲学社会科学文献中心（中文社科，能拿全文 PDF）；"
-    "academic_en=外文文献题录与摘要；"
-    "doi=传 DOI 查合法免费全文；"
-    "book=中文书目；image=配图与梗图；code=GitHub 仓库与插件；"
-    "tech_en=英文工程资料"
-)
+# 工具描述里的「哪类问题走哪个源」直接由 ENGINE_MAP 生成，避免与 README 表格各写一份而漂移。
+_KIND_HINT = "；".join(f"{kind}={spec.purpose}" for kind, spec in argo_cli.ENGINE_MAP.items())
 
 
 class ArgoLookup(MaiBotPlugin):
@@ -161,7 +160,7 @@ class ArgoLookup(MaiBotPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._cache: dict[tuple[str, str, int], tuple[float, str]] = {}
+        self._cache: dict[tuple[str, str, int, str], tuple[float, str]] = {}
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._jobs_dir: Path | None = None
 
@@ -185,11 +184,15 @@ class ArgoLookup(MaiBotPlugin):
         bucket.append(now)
         return True
 
-    def _remember(self, key: tuple[str, str, int], text: str) -> None:
-        if len(self._cache) >= _CACHE_MAX:
-            oldest = min(self._cache, key=lambda k: self._cache[k][0])
-            self._cache.pop(oldest, None)
+    def _remember(self, key: tuple[str, str, int, str], text: str) -> None:
+        self._cache.pop(key, None)
+        while len(self._cache) >= _CACHE_MAX:
+            self._cache.pop(next(iter(self._cache)), None)
         self._cache[key] = (time.monotonic(), text)
+
+    def _touch(self, key: tuple[str, str, int, str]) -> None:
+        """命中后移到队尾：淘汰按最近使用，而不是最早写入。"""
+        self._cache[key] = self._cache.pop(key)
 
     def _job_root(self) -> Path:
         if self._jobs_dir is None:
@@ -219,8 +222,20 @@ class ArgoLookup(MaiBotPlugin):
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
         root = argo_cli.argo_root(self.config.argo.root)
         if not argo_cli.launcher(root).exists():
-            self.ctx.logger.warning("argo 启动器不存在，检索类工具将不可用：%s", argo_cli.launcher(root))
-        removed = argo_cli.prune_jobs(self._jobs_dir, retention_days=self.config.jobs.retention_days)
+            self.ctx.logger.warning(
+                "argo 启动器不存在，检索类工具将不可用：%s", argo_cli.launcher(root)
+            )
+        mode = (self.config.argo.mode or "").strip().lower()
+        if mode not in argo_cli.SEARCH_MODES:
+            self.ctx.logger.warning(
+                "argo.mode=%r 不是 argo 认的取值（%s），检索按 %s 处理",
+                self.config.argo.mode,
+                "/".join(argo_cli.SEARCH_MODES),
+                argo_cli.DEFAULT_MODE,
+            )
+        removed = argo_cli.prune_jobs(
+            self._jobs_dir, retention_days=self.config.jobs.retention_days
+        )
         self.ctx.logger.info("argo 检索插件已加载（清理过期作业 %s 个）", removed)
 
     async def on_unload(self) -> None:
@@ -232,7 +247,9 @@ class ArgoLookup(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         if scope == CONFIG_RELOAD_SCOPE_SELF:
             self._cache.clear()
-            self.ctx.logger.info("argo 检索配置已更新（scope=%s，配置版本=%s）", scope, version or "未标注")
+            self.ctx.logger.info(
+                "argo 检索配置已更新（scope=%s，配置版本=%s）", scope, version or "未标注"
+            )
 
     # ── 组件一：按类选源的检索 ──────────────────────────────────────
 
@@ -276,7 +293,7 @@ class ArgoLookup(MaiBotPlugin):
     async def handle_lookup(self, **kwargs: Any) -> dict:
         query = str(kwargs.get("query") or "").strip()
         if not query:
-            return {"success": False, "content": "缺少 query：要查什么？"}
+            return fail("缺少 query：要查什么？")
 
         kind = str(kwargs.get("kind") or "web").strip().lower()
         try:
@@ -287,12 +304,14 @@ class ArgoLookup(MaiBotPlugin):
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
-            return {"success": False, "content": "这个问题问得有点快，等一分钟再查。"}
+            return fail("这个问题问得有点快，等一分钟再查。")
 
         engine, note = argo_cli.resolve_engine(kind, self.config.limits.enable_paid, query)
-        cache_key = (engine, query, want)
+        mode = argo_cli.normalize_mode(self.config.argo.mode)
+        cache_key = (engine, query, want, mode)
         cached = self._cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
+            self._touch(cache_key)
             return {"success": True, "content": cached[1]}
 
         payload = await asyncio.to_thread(
@@ -300,12 +319,12 @@ class ArgoLookup(MaiBotPlugin):
             query,
             engine,
             max_results=want,
-            mode=self.config.argo.mode,
+            mode=mode,
             timeout=int(self.config.argo.timeout_seconds),
             **self._argo_kwargs(),
         )
         if payload.get("error"):
-            return {"success": False, "content": f"检索失败：{payload['error']}"}
+            return fail(f"检索失败：{payload['error']}")
 
         text = argo_cli.format_results(
             payload,
@@ -377,7 +396,7 @@ class ArgoLookup(MaiBotPlugin):
                 **self._argo_kwargs(),
             )
             if meta.get("error"):
-                return {"success": False, "content": f"提交失败：{meta['error']}"}
+                return fail(f"提交失败：{meta['error']}")
             return {
                 "success": True,
                 "content": (
@@ -392,7 +411,8 @@ class ArgoLookup(MaiBotPlugin):
             if not rows:
                 return {"success": True, "content": "还没有作业记录。"}
             lines = [
-                f"{row['job_id']}｜{row['state']}｜{row.get('task') or '?'}：{(row.get('target') or '')[:40]}"
+                f"{row['job_id']}｜{row['state']}｜{row.get('task') or '?'}："
+                f"{(row.get('target') or '')[:40]}"
                 for row in rows
             ]
             return {"success": True, "content": "\n".join(lines)}
@@ -400,16 +420,16 @@ class ArgoLookup(MaiBotPlugin):
         job_id = str(kwargs.get("job_id") or "").strip()
         if action == "cancel":
             if not job_id:
-                return {"success": False, "content": "要取消哪个作业？请给 job_id。"}
+                return fail("要取消哪个作业？请给 job_id。")
             result = await asyncio.to_thread(argo_cli.cancel_job, job_root, job_id)
             if result.get("error"):
-                return {"success": False, "content": result["error"]}
+                return fail(result["error"])
             return {"success": True, "content": f"作业 {result['job_id']} 已取消。"}
 
         if not job_id:
             rows = await asyncio.to_thread(argo_cli.list_jobs, job_root, limit=1)
             if not rows:
-                return {"success": False, "content": "没有正在跑的作业，也没有给 job_id。"}
+                return fail("没有正在跑的作业，也没有给 job_id。")
             job_id = rows[0]["job_id"]
 
         info = await asyncio.to_thread(
@@ -419,7 +439,7 @@ class ArgoLookup(MaiBotPlugin):
             log_lines=int(self.config.jobs.max_log_lines),
         )
         if info.get("error"):
-            return {"success": False, "content": info["error"]}
+            return fail(info["error"])
 
         state_map = {"running": "运行中", "done": "已完成", "failed": "失败", "lost": "已失联"}
         state = state_map.get(info.get("state") or "", info.get("state") or "未知")

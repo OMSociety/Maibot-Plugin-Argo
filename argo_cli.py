@@ -16,27 +16,44 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 DEFAULT_ROOT = Path(r"C:\Users\Administrator\argo")
 
-# kind -> (argo 引擎, 是否计费)
-ENGINE_MAP: dict[str, tuple[str, bool]] = {
-    "web": ("metaso", False),
-    "news": ("deepseek_search", True),
-    "academic_cn": ("metaso_scholar", False),
-    "fulltext_cn": ("ncpssd", False),
-    "academic_en": ("sciverse", False),
-    "doi": ("unpaywall", False),
-    "book": ("weread", False),
-    "image": ("metaso_image", False),
-    "code": ("github", False),
-    "tech_en": ("tavily", True),
+
+class KindSpec(NamedTuple):
+    """一个来源类别的完整定义。"""
+
+    engine: str
+    paid: bool
+    purpose: str
+
+
+# kind -> 引擎/计费/适用场景。工具描述、README 表格都由它派生，不要另抄一份。
+ENGINE_MAP: dict[str, KindSpec] = {
+    "web": KindSpec("metaso", False, "中文综合，游戏影视对比、热梗、娱乐热点、新闻综述"),
+    "news": KindSpec("deepseek_search", True, "时事新闻，带发布日期与权威分级"),
+    "academic_cn": KindSpec("metaso_scholar", False, "中文期刊题录（万方/维普）"),
+    "fulltext_cn": KindSpec("ncpssd", False, "中文社科全文 PDF（国家哲学社会科学文献中心）"),
+    "academic_en": KindSpec("sciverse", False, "外文文献题录与摘要"),
+    "doi": KindSpec("unpaywall", False, "传 DOI 查合法免费全文"),
+    "book": KindSpec("weread", False, "中文书目"),
+    "image": KindSpec("metaso_image", False, "配图与梗图"),
+    "code": KindSpec("github", False, "GitHub 仓库与插件"),
+    "tech_en": KindSpec("tavily", True, "英文工程资料"),
 }
 
 # 允许作为长任务提交的 argo 子命令
 JOB_TASKS = ("research", "crawl", "pdf", "paper", "article")
 
-DETACHED_FLAGS = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0
+# argo `search --mode` 的合法取值：fast=免费优先、auto=成本感知、deep=质量优先、budget=配额控制。
+# `--depth` 是另一组取值（fast/balanced/deep），传错会被 argparse 拒（exit 2）。
+SEARCH_MODES = ("fast", "auto", "deep", "budget")
+DEFAULT_MODE = "fast"
+
+# DETACHED_PROCESS 让作业脱离宿主控制台；CREATE_NEW_PROCESS_GROUP 便于整组结束。
+# CREATE_NO_WINDOW（0x08000000）与 DETACHED_PROCESS 同用时被系统忽略，故不传。
+DETACHED_FLAGS = 0x00000008 | 0x00000200 if os.name == "nt" else 0
 
 
 # ── 基础工具 ────────────────────────────────────────────────────────────
@@ -68,19 +85,28 @@ def looks_like_doi(query: str) -> bool:
     q = (query or "").strip().lower()
     for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
         if q.startswith(prefix):
-            q = q[len(prefix):].strip()
+            q = q[len(prefix) :].strip()
     return q.startswith("10.") and "/" in q
 
 
 def resolve_engine(kind: str, enable_paid: bool, query: str) -> tuple[str, str]:
     """返回 (引擎, 降级说明)；降级说明为空表示按用户所要求的那类源检索。"""
     kind = (kind or "web").strip().lower()
-    engine, paid = ENGINE_MAP.get(kind, ENGINE_MAP["web"])
+    spec = ENGINE_MAP.get(kind, ENGINE_MAP["web"])
     if kind == "doi" and not looks_like_doi(query):
         return "metaso_scholar", "传入的不是 DOI，改用中文期刊题录"
-    if paid and not enable_paid:
+    if spec.paid and not enable_paid:
         return "metaso", f"{kind} 这一档用的是计费源，已按配置改用中文综合"
-    return engine, ""
+    return spec.engine, ""
+
+
+def normalize_mode(mode: str | None) -> str:
+    """把 ``--mode`` 收敛到 argo 认的取值；不认识的一律按 fast。
+
+    fast 是免费优先档，配置写错时宁可少花钱也不要让整次检索因 argparse 退出码 2 而失败。
+    """
+    value = (mode or "").strip().lower()
+    return value if value in SEARCH_MODES else DEFAULT_MODE
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -115,7 +141,7 @@ def search(
     engine: str,
     *,
     max_results: int = 5,
-    mode: str = "fast",
+    mode: str = DEFAULT_MODE,
     timeout: int = 25,
     root: str | Path | None = None,
     env_file: str | Path | None = None,
@@ -134,7 +160,7 @@ def search(
         "-n",
         str(max(1, int(max_results))),
         "--mode",
-        mode or "fast",
+        normalize_mode(mode),
         "--timeout",
         str(max(5, int(timeout))),
     ]
@@ -212,12 +238,16 @@ def format_results(
     text = "\n".join(lines)
     count = payload.get("count") or len(results)
     elapsed = payload.get("elapsed_ms")
-    footer = f"（共 {count} 条" + (f"，{int(elapsed)} ms" if isinstance(elapsed, (int, float)) else "") + "）"
+    footer = (
+        f"（共 {count} 条"
+        + (f"，{int(elapsed)} ms" if isinstance(elapsed, (int, float)) else "")
+        + "）"
+    )
     if note:
         footer += f"；{note}"
     text = text + "\n" + footer
-    if len(text) > max_chars:
-        text = text[: max_chars - 1].rstrip() + "…"
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[: max(1, max_chars - 1)].rstrip() + "…"
     return text
 
 
@@ -245,7 +275,9 @@ def submit_job(
     job_dir.mkdir(parents=True, exist_ok=True)
 
     argv = [python or sys.executable, str(launcher(base)), task, target.strip()]
-    (job_dir / "argv.json").write_text(json.dumps(argv, ensure_ascii=False, indent=2), encoding="utf-8")
+    (job_dir / "argv.json").write_text(
+        json.dumps(argv, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     runner = str(Path(__file__).with_name("job_runner.py"))
     try:
@@ -272,7 +304,9 @@ def submit_job(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "state": "running",
     }
-    (job_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (job_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return meta
 
 
@@ -288,7 +322,7 @@ def _tail(path: Path, lines: int, limit_bytes: int = 262144) -> list[str]:
     except OSError:
         return []
     rows = [row.rstrip() for row in chunk.splitlines() if row.strip()]
-    return rows[-max(1, int(lines)):]
+    return rows[-max(1, int(lines)) :]
 
 
 def job_status(job_root: str | Path, job_id: str, *, log_lines: int = 20) -> dict:

@@ -11,16 +11,18 @@
 
 | kind | argo 引擎 | 适合 |
 |---|---|---|
-| `web` | `metaso` | 中文综合；游戏/影视对比、热梗、娱乐热点、新闻综述 |
-| `news` | `deepseek_search` | 时事（带发布日期与权威分级，计费源，默认关） |
+| `web` | `metaso` | 中文综合，游戏影视对比、热梗、娱乐热点、新闻综述 |
+| `news` | `deepseek_search` | 时事新闻，带发布日期与权威分级 |
 | `academic_cn` | `metaso_scholar` | 中文期刊题录（万方/维普） |
-| `fulltext_cn` | `ncpssd` | 国家哲学社会科学文献中心，中文社科全文 PDF |
+| `fulltext_cn` | `ncpssd` | 中文社科全文 PDF（国家哲学社会科学文献中心） |
 | `academic_en` | `sciverse` | 外文文献题录与摘要 |
 | `doi` | `unpaywall` | 传 DOI 查合法免费全文 |
 | `book` | `weread` | 中文书目 |
 | `image` | `metaso_image` | 配图与梗图 |
 | `code` | `github` | GitHub 仓库与插件 |
-| `tech_en` | `tavily` | 英文工程资料（计费源，默认关） |
+| `tech_en` | `tavily` | 英文工程资料 |
+
+`news` 与 `tech_en` 走计费源；`limits.enable_paid` 关闭时自动降级到 `metaso`（中文综合）。
 
 返回文本已排版为「标题｜来源·日期｜摘要｜链接」，整体受 `max_chars` 截断。
 
@@ -50,7 +52,7 @@
 | `argo.root` | `C:\Users\Administrator\argo` | 仓库目录 |
 | `argo.python` | 空 | 留空用麦麦自身解释器 |
 | `argo.env_file` | 空 | 留空用 `%APPDATA%\argo\env` |
-| `argo.mode` | `fast` | 检索模式 |
+| `argo.mode` | `fast` | 检索模式：`fast` / `auto` / `deep` / `budget`，写错按 `fast` |
 | `argo.timeout_seconds` | `25` | 单次检索上限 |
 | `limits.max_results` | `5` | 默认条数（1–10） |
 | `limits.max_chars` | `1500` | 回给模型的字符上限 |

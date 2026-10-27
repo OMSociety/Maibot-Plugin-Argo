@@ -7,3 +7,7 @@ jobs/
 __pycache__/
 *.py[cod]
 .venv/
+# 测试与格式化的缓存
+.pytest_cache/
+.pytest_tmp/
+.ruff_cache/

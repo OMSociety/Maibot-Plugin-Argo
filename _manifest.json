@@ -10,7 +10,7 @@
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/OMSociety/maibot_plugin_argo-lookup"
+    "repository": "https://github.com/OMSociety/Maibot-Plugin-Argo-Lookup"
   },
   "host_application": {
     "min_version": "1.3.0",

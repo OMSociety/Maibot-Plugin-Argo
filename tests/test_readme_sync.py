@@ -20,3 +20,16 @@ def test_readme_table_matches_engine_map():
 
     expected = {kind: (spec.engine, spec.purpose) for kind, spec in argo_cli.ENGINE_MAP.items()}
     assert rows == expected
+
+
+TASK_LINE = re.compile(r"`task` 取 (?P<tasks>[^，]+)")
+
+
+def test_readme_job_tasks_match():
+    tasks = set()
+    for line in README.read_text(encoding="utf-8").splitlines():
+        match = TASK_LINE.search(line)
+        if match:
+            tasks = set(re.findall(r"`([a-z_]+)`", match["tasks"]))
+
+    assert tasks == set(argo_cli.JOB_TASKS)

@@ -1,0 +1,9 @@
+# 宿主运行时生成，含密钥，不入库
+config.toml
+# 作业目录与日志
+jobs/
+*.log
+# Python
+__pycache__/
+*.py[cod]
+.venv/

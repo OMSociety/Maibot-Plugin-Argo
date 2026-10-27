@@ -49,6 +49,10 @@
 | `_manifest.json` 的 `version` 或 `capabilities` | 见「发版」一节；改完用清单校验器过一遍 |
 | 任何 Python 改动 | 跑下面的验收命令，全过再提交 |
 
+改动顺序：先改唯一来源（`argo_cli.ENGINE_MAP`、`argo_cli.JOB_TASKS`、配置字段），
+再让它派生的东西跟随（`plugin.py` 的工具描述与枚举、`README.md` 表格与列表），最后跑用例。
+反过来先改 README 或工具描述，`tests/test_readme_sync.py` 会先红。
+
 ## 验收命令（在仓库根目录执行）
 
 ```powershell
@@ -67,7 +71,8 @@ $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
 
 单跑一组用例：`& $py -m pytest -q tests/test_argo_cli.py -k mode`。
 用例不联网、不调用 argo、不需要宿主进程；`tests/conftest.py` 只做两件事：把插件目录加进
-`sys.path`，把 `tmp_path` 改到仓库内 `.pytest_tmp/`（本机 `%TEMP%` 无读权限）。两处缓存目录都不入库。
+`sys.path`，把 `tmp_path` 改到仓库内 `.pytest_tmp/`（本机 `%TEMP%` 无读权限）。
+`.pytest_tmp/` 与 `.ruff_cache/` 已在 `.gitignore` 里，不要提交。
 
 宿主侧导入冒烟（换了 SDK 版本、改了 `@Tool` 或配置模型后必跑）：
 

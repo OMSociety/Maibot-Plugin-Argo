@@ -1,13 +1,16 @@
-"""argo 检索 —— 把本机 argo 的能力交给麦麦。
+"""Argo 检索桥接器 —— 面向麦麦的冲浪、查梗、ACG/游戏百科、社区风评与搜图识图插件。
 
-两个工具：
-
-- ``argo_lookup``：按「问题类型」选一个检索源，几秒返回带出处的条目；
-- ``argo_job``：长任务提交即返回，作业在独立进程里跑，稍后再取结果。
-
-设计要点：检索与长任务都走本机 argo 命令行（``C:\\Users\\Administrator\\argo``），
-不经网络、不经 MCP；长任务用脱离式进程 + 作业目录（``rc`` 文件即完成信号），
-所以工具调用永远不会长时间挂住对话。
+六个工具：
+1. ``argo_search``：按语义类别 ``kind``（或显式 ``engine``）查梗、查番剧/游戏/百科、
+   看全网实时热榜；
+2. ``argo_image_search``：按关键词搜动漫图、梗图、游戏截图与角色图，把图片经
+   ``content_items`` 回传给麦麦视觉查看并可附上发出；
+3. ``argo_reverse_image``：以图搜图与动漫角色识别（``saucenao`` / ``animetrace`` /
+   ``google_lens``），自动从聊天消息取图并回传缩略图供麦麦核验；
+4. ``argo_social_search``：跨 Bilibili、Twitter/X、小红书、Reddit、V2EX、Hacker News、
+   YouTube 搜玩家社区讨论与实时风评；
+5. ``argo_fetch``：打开网页、攻略长贴、微信公众号文章或单条推文读取正文；
+6. ``argo_job``：多源长线深扒或整站/长文档异步作业，跑完后自动携带摘要唤醒麦麦。
 """
 
 from __future__ import annotations
@@ -26,21 +29,27 @@ from maibot_sdk import (
     PluginConfigBase,
     Tool,
 )
-
-# ToolParameterInfo / ToolParamType 不在 maibot_sdk 顶层导出（2.16.0 的 __all__ 里没有），
-# 它们的定义在 maibot_sdk.types；从顶层导入会直接 ImportError。
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
-try:  # 作为包的一部分加载
-    from . import argo_cli
-except ImportError:  # 作为单文件目录加载
+try:
+    from . import argo_cli, image_helper, worker
+except ImportError:
     import argo_cli  # type: ignore[no-redef]
+    import image_helper  # type: ignore[no-redef]
+    import worker  # type: ignore[no-redef]
 
 _CACHE_TTL = 300.0
 _CACHE_MAX = 128
+_WEIXIN_HOST = "mp.weixin.qq.com"
+_TWEET_URL_PREFIXES = (
+    "https://x.com/",
+    "https://twitter.com/",
+    "http://x.com/",
+    "http://twitter.com/",
+)
 
 
-def fail(message: str) -> dict:
+def fail(message: str) -> dict[str, Any]:
     """失败结果。宿主取 ``error`` 当错误信息、``content`` 当可见文本，两个字段都填。"""
     return {"success": False, "error": message, "content": message}
 
@@ -67,18 +76,23 @@ class ArgoSection(PluginConfigBase):
 
     root: str = Field(
         default=r"C:\Users\Administrator\argo",
-        description="argo 仓库目录（须包含 bin/argo）",
+        description="argo 仓库目录（须包含 bin/argo 与 scripts/mcp_server.py）",
         json_schema_extra={"label": "argo 目录", "hint": "换机器时改这里"},
     )
     python: str = Field(
-        default="",
-        description="启动 argo 用的解释器路径；留空表示用麦麦自身解释器",
-        json_schema_extra={"label": "Python 解释器", "hint": "留空即可，需装有 PyYAML"},
+        default=argo_cli.DEFAULT_PYTHON,
+        description="启动 argo 常驻 Worker 用的 Python 解释器路径（需装有 curl_cffi 等依赖）",
+        json_schema_extra={"label": "Python 解释器", "hint": "留空走系统 Python 3.13"},
     )
     env_file: str = Field(
         default="",
         description="argo 的密钥文件；留空表示用 %APPDATA%\\argo\\env",
         json_schema_extra={"label": "密钥文件", "hint": "留空走默认位置"},
+    )
+    proxy: str = Field(
+        default="http://127.0.0.1:7897",
+        description="下载搜图/反搜预览缩略图时使用的 HTTP 代理（填 direct 则直连）",
+        json_schema_extra={"label": "图片下载代理"},
     )
     mode: str = Field(
         default=argo_cli.DEFAULT_MODE,
@@ -106,24 +120,24 @@ class LimitsSection(PluginConfigBase):
         json_schema_extra={"label": "默认条数"},
     )
     max_chars: int = Field(
-        default=1500,
+        default=1800,
         description="回给模型的总字符上限",
         json_schema_extra={"label": "输出上限（字符）"},
     )
     calls_per_minute: int = Field(
-        default=6,
+        default=10,
         description="同一会话每分钟最多几次检索",
         json_schema_extra={"label": "每分钟上限", "hint": "防止群友刷屏"},
     )
     enable_paid: bool = Field(
-        default=False,
-        description="是否允许用时事/英文工程这两档的计费源",
-        json_schema_extra={"label": "允许计费源", "hint": "关闭时自动改用中文综合源"},
+        default=True,
+        description="是否允许用时事（deepseek_search）/ 英文冲浪（tavily）这两档计费源",
+        json_schema_extra={"label": "允许计费源", "hint": "关闭时自动改用中文综合源 metaso"},
     )
 
 
 class JobsSection(PluginConfigBase):
-    """长任务作业目录的维护策略。"""
+    """长任务作业目录与主动唤醒策略。"""
 
     __ui_label__ = "长任务"
     __ui_order__ = 3
@@ -138,9 +152,14 @@ class JobsSection(PluginConfigBase):
         description="查看状态时回显的日志尾部行数",
         json_schema_extra={"label": "日志行数"},
     )
+    proactive_notify: bool = Field(
+        default=True,
+        description="后台长任务完成后是否自动携带结果摘要唤醒麦麦汇报",
+        json_schema_extra={"label": "完成主动唤醒"},
+    )
 
 
-class ArgoLookupConfig(PluginConfigBase):
+class ArgoConfig(PluginConfigBase):
     """插件完整配置。"""
 
     plugin: PluginSection = Field(default_factory=PluginSection)
@@ -149,20 +168,23 @@ class ArgoLookupConfig(PluginConfigBase):
     jobs: JobsSection = Field(default_factory=JobsSection)
 
 
-# 工具描述里的「哪类问题走哪个源」直接由 ENGINE_MAP 生成，避免与 README 表格各写一份而漂移。
 _KIND_HINT = "；".join(f"{kind}={spec.purpose}" for kind, spec in argo_cli.ENGINE_MAP.items())
+_REVERSE_HINT = "；".join(f"{eng}={desc}" for eng, desc in argo_cli.REVERSE_IMAGE_ENGINES.items())
 
 
-class ArgoLookup(MaiBotPlugin):
-    """插件主类。"""
+class ArgoPlugin(MaiBotPlugin):
+    """Argo 检索桥接器插件主类。"""
 
-    config_model = ArgoLookupConfig
+    config_model = ArgoConfig
 
     def __init__(self) -> None:
         super().__init__()
         self._cache: dict[tuple[str, str, int, str], tuple[float, str]] = {}
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._jobs_dir: Path | None = None
+        self._temp_img_dir: Path | None = None
+        self._worker: worker.ArgoWorker | None = None
+        self._watch_tasks: dict[str, asyncio.Task[None]] = {}
 
     # ── 内部辅助 ────────────────────────────────────────────────────
 
@@ -170,8 +192,40 @@ class ArgoLookup(MaiBotPlugin):
         return {
             "root": self.config.argo.root,
             "env_file": self.config.argo.env_file or None,
-            "python": self.config.argo.python or None,
+            "python": self.config.argo.python or argo_cli.default_python(),
         }
+
+    def _temp_root(self) -> Path:
+        if self._temp_img_dir is None:
+            try:
+                base = self.ctx.paths.data_dir
+            except Exception:
+                base = Path(__file__).resolve().parent / "data"
+            self._temp_img_dir = base / "temp_images"
+            self._temp_img_dir.mkdir(parents=True, exist_ok=True)
+        return self._temp_img_dir
+
+    def _job_root(self) -> Path:
+        if self._jobs_dir is None:
+            try:
+                base = self.ctx.paths.data_dir
+            except Exception:
+                base = Path(__file__).resolve().parent / "data"
+            self._jobs_dir = base / "jobs"
+            self._jobs_dir.mkdir(parents=True, exist_ok=True)
+        return self._jobs_dir
+
+    def _get_worker(self) -> worker.ArgoWorker:
+        if self._worker is None:
+            env_file = self.config.argo.env_file or str(argo_cli.default_env_file())
+            self._worker = worker.ArgoWorker(
+                python_path=self.config.argo.python or argo_cli.default_python(),
+                argo_dir=self.config.argo.root,
+                argo_env_file=env_file,
+                temp_image_root=self._temp_root(),
+                default_timeout=float(self.config.argo.timeout_seconds),
+            )
+        return self._worker
 
     def _rate_ok(self, stream_id: str) -> bool:
         limit = max(1, int(self.config.limits.calls_per_minute))
@@ -191,14 +245,7 @@ class ArgoLookup(MaiBotPlugin):
         self._cache[key] = (time.monotonic(), text)
 
     def _touch(self, key: tuple[str, str, int, str]) -> None:
-        """命中后移到队尾：淘汰按最近使用，而不是最早写入。"""
         self._cache[key] = self._cache.pop(key)
-
-    def _job_root(self) -> Path:
-        if self._jobs_dir is None:
-            self._jobs_dir = self.ctx.paths.data_dir / "jobs"
-            self._jobs_dir.mkdir(parents=True, exist_ok=True)
-        return self._jobs_dir
 
     @staticmethod
     def _elapsed_text(created_at: str | None) -> str:
@@ -215,11 +262,52 @@ class ArgoLookup(MaiBotPlugin):
             return f"{seconds // 60} 分 {seconds % 60} 秒"
         return f"{seconds // 3600} 小时 {(seconds % 3600) // 60} 分"
 
+    async def _watch_job_and_notify(self, job_id: str, stream_id: str) -> None:
+        """后台轮询作业目录的 rc 文件；一旦完成则携带输出摘要主动唤醒麦麦。"""
+        job_root = self._job_root()
+        try:
+            for _ in range(360):  # 最长守候约 12 分钟
+                await asyncio.sleep(2.0)
+                info = await asyncio.to_thread(
+                    argo_cli.job_status,
+                    job_root,
+                    job_id,
+                    log_lines=int(self.config.jobs.max_log_lines),
+                )
+                state = info.get("state")
+                if state in ("done", "failed", "lost"):
+                    if not info.get("notified") and stream_id and self.config.jobs.proactive_notify:
+                        await asyncio.to_thread(argo_cli.mark_job_notified, job_root, job_id)
+                        tail_lines = info.get("tail") or []
+                        summary = "\n".join(tail_lines)[-1200:] if tail_lines else "（无输出内容）"
+                        state_cn = "已完成" if state == "done" else f"异常结束({state})"
+                        head = f"后台长任务 {job_id}（{info.get('task')}：{info.get('target')}）"
+                        intent = (
+                            f"{head}{state_cn}。\n"
+                            f"结果摘要：\n{summary}\n"
+                            "请用你平时聊天的语气自然地把查到的关键信息告诉群友。"
+                        )
+                        try:
+                            await self.ctx.maisaka.proactive.trigger(
+                                stream_id,
+                                intent,
+                                source="omsociety.argo",
+                                reason=f"argo_job {job_id} {state}",
+                                metadata={"job_id": job_id, "state": state},
+                            )
+                        except Exception as exc:
+                            self.ctx.logger.warning("主动唤醒麦麦失败 (job=%s): %s", job_id, exc)
+                    return
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._watch_tasks.pop(job_id, None)
+
     # ── 生命周期 ────────────────────────────────────────────────────
 
     async def on_load(self) -> None:
-        self._jobs_dir = self.ctx.paths.data_dir / "jobs"
-        self._jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._job_root()
+        self._temp_root()
         root = argo_cli.argo_root(self.config.argo.root)
         if not argo_cli.launcher(root).exists():
             self.ctx.logger.warning(
@@ -234,68 +322,107 @@ class ArgoLookup(MaiBotPlugin):
                 argo_cli.DEFAULT_MODE,
             )
         removed = argo_cli.prune_jobs(
-            self._jobs_dir, retention_days=self.config.jobs.retention_days
+            self._job_root(), retention_days=self.config.jobs.retention_days
         )
-        self.ctx.logger.info("argo 检索插件已加载（清理过期作业 %s 个）", removed)
+        try:
+            await self._get_worker().start()
+        except Exception as exc:
+            self.ctx.logger.warning("Argo 常驻 Worker 预热失败（将在首次调用时重试）：%s", exc)
+        self.ctx.logger.info("Argo 检索桥接器已加载（清理过期作业 %s 个）", removed)
 
     async def on_unload(self) -> None:
-        # 不杀作业进程：它们是独立进程，宿主重启也应当继续跑完。
+        for task in list(self._watch_tasks.values()):
+            task.cancel()
+        self._watch_tasks.clear()
+        if self._worker is not None:
+            await self._worker.close()
+            self._worker = None
         self._cache.clear()
         self._hits.clear()
-        self.ctx.logger.info("argo 检索插件已卸载（在跑的作业不受影响）")
+        self.ctx.logger.info("Argo 检索桥接器已卸载")
 
-    async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
+    async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
+        del config_data
         if scope == CONFIG_RELOAD_SCOPE_SELF:
             self._cache.clear()
+            if self._worker is not None:
+                self._worker.update_settings(
+                    python_path=self.config.argo.python or argo_cli.default_python(),
+                    argo_dir=self.config.argo.root,
+                    argo_env_file=self.config.argo.env_file or str(argo_cli.default_env_file()),
+                    default_timeout=float(self.config.argo.timeout_seconds),
+                )
             self.ctx.logger.info(
-                "argo 检索配置已更新（scope=%s，配置版本=%s）", scope, version or "未标注"
+                "Argo 检索桥接器配置已热更新（scope=%s，版本=%s）", scope, version or "未标注"
             )
 
-    # ── 组件一：按类选源的检索 ──────────────────────────────────────
+    # ── 工具 1：网上冲浪与分类检索 ──────────────────────────────────
 
     @Tool(
-        "argo_lookup",
-        brief_description="按问题类型选源检索，返回几条带出处与链接的资料",
+        "argo_search",
+        brief_description="网上冲浪、查热梗、查番剧与游戏设定、查百科词条或看全网实时热榜",
         detailed_description=(
-            "想查资料、找论文、找说法出处、看最近消息时调用。一次只选一个来源类别，几秒返回。\n"
-            f"kind 的取值与用途：{_KIND_HINT}。\n"
-            "选源判断：群友聊游戏/影视/梗/八卦用 web；问「今天出什么事了」用 news；"
-            "问「有没有研究说过」用 academic_cn 或 fulltext_cn；问外文文献用 academic_en；"
-            "手上有 DOI 用 doi；找书用 book；要配图用 image；找插件或仓库用 code；"
-            "写代码遇到英文技术问题用 tech_en。\n"
-            "返回值已经排好版（标题｜来源与日期｜摘要｜链接），直接转述即可，不必复述全部条目。"
+            "麦麦上网查资料、懂新梗、查 ACG 与游戏情报、看热搜的主力工具，毫秒级常驻通道返回。\n"
+            f"优先按语义选 kind：{_KIND_HINT}。\n"
+            "选路指南：\n"
+            "- 看不懂的抽象话/新梗/流行黑话 -> kind=meme（英文梗/缩写用 kind=slang_en）；\n"
+            "- 动画/番剧/漫画/轻小说/Galgame -> kind=anime；Steam 游戏/发售/评测 -> kind=game；\n"
+            "- 人物/作品设定/常识词条 -> kind=baike 或 kind=wiki；攻略视频 -> kind=video；\n"
+            "  查歌 -> kind=music；\n"
+            "- 问「最近B站/微博/知乎/抖音在火什么」 -> kind=hot_bili / hot_weibo /\n"
+            "  hot_zhihu / hot_douyin；\n"
+            "- 今天刚出的大事/通报 -> kind=news；日常中文综合冲浪 -> kind=web；\n"
+            "  外网英文资讯 -> kind=web_en。\n"
+            "若需要直指底层特定引擎，也可填可选参数 engine（填了 engine 会优先于 kind）。\n"
+            "注意：搜图片请调 argo_image_search，以图搜图请调 argo_reverse_image。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="检索词；用群友的原话或提炼出的关键词都行",
+                description="检索关键词；看热榜（hot_*）时随便填如『热榜』即可",
                 required=True,
             ),
             ToolParameterInfo(
                 name="kind",
                 param_type=ToolParamType.STRING,
-                description="来源类别",
+                description="语义来源类别",
                 enum_values=list(argo_cli.ENGINE_MAP.keys()),
                 default="web",
                 required=False,
             ),
             ToolParameterInfo(
+                name="engine",
+                param_type=ToolParamType.STRING,
+                description="可选：显式指定底层 Argo 引擎名（留空则按 kind 自动映射）",
+                required=False,
+                default="",
+            ),
+            ToolParameterInfo(
                 name="max_results",
                 param_type=ToolParamType.INTEGER,
-                description="最多几条（1–10），不确定就不填",
+                description="返回条数（1–10），默认 5",
                 required=False,
                 default=5,
             ),
         ],
         visibility="visible",
     )
-    async def handle_lookup(self, **kwargs: Any) -> dict:
+    async def handle_search(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.config.plugin.enabled:
+            return fail("Argo 检索桥接器已在配置中关闭。")
+
         query = str(kwargs.get("query") or "").strip()
         if not query:
             return fail("缺少 query：要查什么？")
 
         kind = str(kwargs.get("kind") or "web").strip().lower()
+        explicit_engine = str(kwargs.get("engine") or "").strip().lower()
+        if explicit_engine in argo_cli.REVERSE_IMAGE_ENGINES:
+            return fail(f"{explicit_engine} 是以图搜图引擎，请改调专用工具 argo_reverse_image。")
+        if explicit_engine == "metaso_image":
+            return fail("搜图片请改调专用工具 argo_image_search（支持把图片直接带回给你查看）。")
+
         try:
             want = int(kwargs.get("max_results") or self.config.limits.max_results)
         except (TypeError, ValueError):
@@ -304,9 +431,14 @@ class ArgoLookup(MaiBotPlugin):
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
-            return fail("这个问题问得有点快，等一分钟再查。")
+            return fail("查得太快啦，歇几秒钟再试。")
 
-        engine, note = argo_cli.resolve_engine(kind, self.config.limits.enable_paid, query)
+        engine, note = argo_cli.resolve_engine(
+            kind,
+            self.config.limits.enable_paid,
+            query,
+            explicit_engine=explicit_engine,
+        )
         mode = argo_cli.normalize_mode(self.config.argo.mode)
         cache_key = (engine, query, want, mode)
         cached = self._cache.get(cache_key)
@@ -314,17 +446,51 @@ class ArgoLookup(MaiBotPlugin):
             self._touch(cache_key)
             return {"success": True, "content": cached[1]}
 
-        payload = await asyncio.to_thread(
-            argo_cli.search,
-            query,
-            engine,
-            max_results=want,
-            mode=mode,
-            timeout=int(self.config.argo.timeout_seconds),
-            **self._argo_kwargs(),
+        payload = await self._get_worker().call_tool(
+            "argo_search",
+            {
+                "query": query,
+                "engine": engine,
+                "max_results": want,
+                "mode": mode,
+                "include_local": False,
+                "summary": True,
+            },
+            timeout=float(self.config.argo.timeout_seconds),
         )
         if payload.get("error"):
+            # 常驻 Worker 异常时回退一次 CLI
+            payload = await asyncio.to_thread(
+                argo_cli.search,
+                query,
+                engine,
+                max_results=want,
+                mode=mode,
+                timeout=int(self.config.argo.timeout_seconds),
+                **self._argo_kwargs(),
+            )
+        if payload.get("error"):
             return fail(f"检索失败：{payload['error']}")
+
+        # 垂直引擎常因语种或收录范围空手而归（如 Steam 商店按英文商店检索中文名），
+        # 走 kind 选路时补一次综合网页检索，避免群友只得到一句「没找到」。
+        fallback_note = ""
+        if not payload.get("count") and not explicit_engine and engine != "metaso":
+            retry = await self._get_worker().call_tool(
+                "argo_search",
+                {
+                    "query": query,
+                    "engine": "metaso",
+                    "max_results": want,
+                    "mode": mode,
+                    "include_local": False,
+                    "summary": True,
+                },
+                timeout=float(self.config.argo.timeout_seconds),
+            )
+            if retry.get("count"):
+                payload = retry
+                fallback_note = f"（{engine} 未命中，已回退综合检索）\n"
 
         text = argo_cli.format_results(
             payload,
@@ -332,23 +498,494 @@ class ArgoLookup(MaiBotPlugin):
             max_chars=int(self.config.limits.max_chars),
             note=note,
         )
+        if fallback_note:
+            text = fallback_note + text
         self._remember(cache_key, text)
         return {"success": True, "content": text}
 
-    # ── 组件二：长任务 ──────────────────────────────────────────────
+    # ── 工具 2：按词搜配图/梗图（带视觉回传） ─────────────────────────
+
+    @Tool(
+        "argo_image_search",
+        brief_description="按关键词搜索动漫图、角色图、表情包梗图或游戏截图，并把图片带回给麦麦查看和发送",
+        detailed_description=(
+            "想找某个人物/番剧的图片、搜表情包梗图、看某款游戏或物品长什么样时调用。\n"
+            "插件会自动下载前几张可用图片并作为工具图片结果（content_items）放入你的视觉上下文："
+            "你不仅能亲眼看到搜出来的图对不对，还能在 reply 工具里用 attach_pic="
+            '"tool_result:<call_id>:1" 把看中的图直接发给群友！'
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="query",
+                param_type=ToolParamType.STRING,
+                description="搜图关键词，例如『孤独摇滚 后藤一里 表情包』『黑神话悟空 截图』",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="max_results",
+                param_type=ToolParamType.INTEGER,
+                description="最多带回几张图片供查看（1–4，默认 2）",
+                required=False,
+                default=2,
+            ),
+        ],
+        visibility="visible",
+    )
+    async def handle_image_search(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.config.plugin.enabled:
+            return fail("Argo 检索桥接器已在配置中关闭。")
+
+        query = str(kwargs.get("query") or "").strip()
+        if not query:
+            return fail("缺少 query：要搜什么图片？")
+
+        try:
+            limit = int(kwargs.get("max_results") or 2)
+        except (TypeError, ValueError):
+            limit = 2
+        limit = max(1, min(4, limit))
+
+        stream_id = str(kwargs.get("stream_id") or "")
+        if not self._rate_ok(stream_id):
+            return fail("搜图太频繁啦，稍等一下再试。")
+
+        payload = await self._get_worker().call_tool(
+            "argo_search",
+            {
+                "query": query,
+                "engine": "metaso_image",
+                "max_results": max(6, limit * 3),
+                "include_local": False,
+                "summary": False,
+            },
+            timeout=float(self.config.argo.timeout_seconds),
+        )
+        if payload.get("error"):
+            return fail(f"搜图失败：{payload['error']}")
+
+        raw_results = [r for r in (payload.get("results") or []) if isinstance(r, dict)]
+        if not raw_results:
+            return fail(f"没有搜到与「{query}」相关的图片。")
+
+        content_items: list[dict[str, Any]] = []
+        lines: list[str] = []
+        proxy = self.config.argo.proxy
+
+        for item in raw_results:
+            if len(content_items) >= limit:
+                break
+            img_url = str(item.get("image_url") or item.get("url") or "").strip()
+            if not img_url:
+                continue
+            title = str(item.get("title") or query).strip()
+            idx = len(content_items) + 1
+            desc = f"搜索「{query}」第 {idx} 张图：{title}（来源：{img_url}）"
+            c_item = await image_helper.download_image_as_content_item(
+                img_url,
+                description=desc,
+                name_prefix=f"imgsearch_{idx}",
+                proxy=proxy,
+            )
+            if c_item is not None:
+                content_items.append(c_item)
+                lines.append(f"{idx}. {title}\n   图片直链：{img_url}")
+
+        if not content_items:
+            text_fallback = argo_cli.format_results(payload, max_items=limit, max_chars=1200)
+            return {
+                "success": True,
+                "content": "搜到了候选图片，但缩略图防盗链未能直接拉取，仅返回链接：\n"
+                + text_fallback,
+            }
+
+        summary_text = (
+            f"已搜索「{query}」并带回 {len(content_items)} 张图片到你的视觉上下文"
+            "（如果要发给群友，可在 reply 的 attach_pic 填对应 tool_result 编号）：\n"
+            + "\n".join(lines)
+        )
+        return {
+            "success": True,
+            "content": summary_text,
+            "content_items": content_items,
+        }
+
+    # ── 工具 3：以图搜图与动漫角色识别（自动取图 + 缩略图回传） ─────
+
+    @Tool(
+        "argo_reverse_image",
+        brief_description=(
+            "以图搜图与动漫角色识别：查插画 Pixiv 原图画师、认番剧截图角色、查梗图或照片出处"
+        ),
+        detailed_description=(
+            "当群友发了一张图问『这是谁』『出自哪部番』『求画师/原图/P站ID』时调用。\n"
+            f"必选 engine：{_REVERSE_HINT}。\n"
+            "图片获取方式：\n"
+            "1. 搜聊天里的图（最常用）：传目标图片所在消息的 msg_id"
+            "（留空则自动找当前会话最新一张图），无需填 image_url；\n"
+            "2. 搜公网图片链接：直接填 image_url"
+            "（google_lens 仅支持公网图片链接，聊天本地图请选 saucenao 或 animetrace）。\n"
+            "插件会把匹配结果首条缩略图放入 content_items 供你亲眼核对与用 attach_pic 发出。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="engine",
+                param_type=ToolParamType.STRING,
+                description=(
+                    "反搜引擎：saucenao（二次元原图/画师首选）/ animetrace（认动漫角色与番名）"
+                    "/ google_lens（通用识图，仅限公网直链）"
+                ),
+                enum_values=list(argo_cli.REVERSE_IMAGE_ENGINES.keys()),
+                default="saucenao",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="msg_id",
+                param_type=ToolParamType.STRING,
+                description=("可选：聊天消息编号（如 m12）；留空且未填 image_url 时取最新带图消息"),
+                required=False,
+                default="",
+            ),
+            ToolParameterInfo(
+                name="image_index",
+                param_type=ToolParamType.INTEGER,
+                description="同一条消息里第几张图（从 0 开始，默认 0）",
+                required=False,
+                default=0,
+            ),
+            ToolParameterInfo(
+                name="image_url",
+                param_type=ToolParamType.STRING,
+                description="可选：公网图片直链（http/https）；搜聊天图片时留空",
+                required=False,
+                default="",
+            ),
+            ToolParameterInfo(
+                name="max_results",
+                param_type=ToolParamType.INTEGER,
+                description="返回匹配条数（1–8，默认 5）",
+                required=False,
+                default=5,
+            ),
+        ],
+        visibility="visible",
+    )
+    async def handle_reverse_image(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.config.plugin.enabled:
+            return fail("Argo 检索桥接器已在配置中关闭。")
+
+        engine = str(kwargs.get("engine") or "saucenao").strip().lower()
+        if engine not in argo_cli.REVERSE_IMAGE_ENGINES:
+            return fail(
+                f"不支持的反搜引擎：{engine}（可选：{' / '.join(argo_cli.REVERSE_IMAGE_ENGINES)}）"
+            )
+
+        msg_id = str(kwargs.get("msg_id") or "").strip()
+        try:
+            image_index = max(0, int(kwargs.get("image_index") or 0))
+        except (TypeError, ValueError):
+            image_index = 0
+        try:
+            want = max(1, min(8, int(kwargs.get("max_results") or 5)))
+        except (TypeError, ValueError):
+            want = 5
+
+        raw_url = str(kwargs.get("image_url") or "").strip()
+        stream_id = str(kwargs.get("stream_id") or "")
+
+        temp_file: Path | None = None
+        if raw_url:
+            if not image_helper.is_public_http_url(raw_url):
+                return fail(
+                    "image_url 仅接受公网 http(s):// 图片直链；"
+                    "搜聊天图片请留空 image_url 并传 msg_id。"
+                )
+            query_target = raw_url
+        else:
+            if engine == "google_lens":
+                return fail(
+                    "google_lens 仅支持公网图片直链（SerpAPI 无本地上传接口）；"
+                    "搜聊天里的图请改用 saucenao 或 animetrace。"
+                )
+            temp_file, err = await image_helper.resolve_chat_image_to_file(
+                self.ctx,
+                stream_id=stream_id,
+                msg_id=msg_id,
+                image_index=image_index,
+                temp_dir=self._temp_root(),
+            )
+            if err or temp_file is None:
+                return fail(err or "无法读取聊天图片。")
+            query_target = str(temp_file)
+
+        try:
+            payload = await self._get_worker().call_tool(
+                "argo_search",
+                {
+                    "query": query_target,
+                    "engine": engine,
+                    "max_results": want,
+                    "include_local": False,
+                    "summary": False,
+                },
+                timeout=max(30.0, float(self.config.argo.timeout_seconds)),
+            )
+        finally:
+            if temp_file is not None:
+                temp_file.unlink(missing_ok=True)
+
+        if payload.get("error"):
+            return fail(f"反搜图失败：{payload['error']}")
+
+        results = [r for r in (payload.get("results") or []) if isinstance(r, dict)]
+        text = argo_cli.format_results(
+            payload,
+            max_items=want,
+            max_chars=int(self.config.limits.max_chars),
+        )
+
+        content_items: list[dict[str, Any]] = []
+        for item in results:
+            thumb_url = str(item.get("image_url") or "").strip()
+            if not thumb_url:
+                continue
+            title = str(item.get("title") or "反搜匹配预览").strip()
+            src_url = str(item.get("url") or "").strip()
+            c_item = await image_helper.download_image_as_content_item(
+                thumb_url,
+                description=f"[{engine}] 匹配预览：{title}（出处：{src_url}）",
+                name_prefix=f"rev_{engine}",
+                proxy=self.config.argo.proxy,
+            )
+            if c_item is not None:
+                content_items.append(c_item)
+                break
+
+        out: dict[str, Any] = {"success": True, "content": text}
+        if content_items:
+            out["content"] = (
+                text + "\n（已将首条匹配缩略图带回你的视觉上下文，核对画面是否一致；"
+                "出处链接以条目中的 url 为准）"
+            )
+            out["content_items"] = content_items
+        return out
+
+    # ── 工具 4：玩家社区与社媒舆情检索 ──────────────────────────────
+
+    @Tool(
+        "argo_social_search",
+        brief_description=(
+            "跨 Bilibili、Twitter/X、小红书、Reddit、V2EX、Hacker News、YouTube "
+            "搜玩家热议与社区风评"
+        ),
+        detailed_description=(
+            "想看网友/玩家对某部新番、游戏、更新补丁、热点事件的真实评价、吐槽或爆料时调用。\n"
+            "platforms 传逗号分隔的平台名，可选：bilibili, twitter, xiaohongshu, reddit, "
+            "v2ex, hackernews, youtube。\n"
+            "mode=text 返回带作者与原帖链接的帖文列表；"
+            "mode=sentiment 额外汇总多平台正负面风评倾向。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="query",
+                param_type=ToolParamType.STRING,
+                description="社区搜索关键词",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="platforms",
+                param_type=ToolParamType.STRING,
+                description="逗号分隔的平台列表，默认 bilibili,twitter",
+                required=False,
+                default="bilibili,twitter",
+            ),
+            ToolParameterInfo(
+                name="mode",
+                param_type=ToolParamType.STRING,
+                description="text（帖文列表）或 sentiment（附带风评情感汇总）",
+                enum_values=["text", "sentiment"],
+                default="text",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="max_results",
+                param_type=ToolParamType.INTEGER,
+                description="每个平台最多返回几条（1–15，默认 6）",
+                required=False,
+                default=6,
+            ),
+        ],
+        visibility="visible",
+    )
+    async def handle_social_search(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.config.plugin.enabled:
+            return fail("Argo 检索桥接器已在配置中关闭。")
+
+        query = str(kwargs.get("query") or "").strip()
+        if not query:
+            return fail("缺少 query：要在社区搜什么？")
+
+        platforms = str(kwargs.get("platforms") or "bilibili,twitter").strip()
+        mode = str(kwargs.get("mode") or "text").strip().lower()
+        if mode not in {"text", "sentiment"}:
+            mode = "text"
+        try:
+            want = max(1, min(15, int(kwargs.get("max_results") or 6)))
+        except (TypeError, ValueError):
+            want = 6
+
+        stream_id = str(kwargs.get("stream_id") or "")
+        if not self._rate_ok(stream_id):
+            return fail("查得太快啦，歇几秒钟再试。")
+
+        payload = await self._get_worker().call_tool(
+            "argo_social_search",
+            {
+                "query": query,
+                "platforms": platforms,
+                "mode": mode,
+                "max_results": want,
+            },
+            timeout=max(25.0, float(self.config.argo.timeout_seconds)),
+        )
+        if payload.get("error"):
+            return fail(f"社区检索失败：{payload['error']}")
+
+        text = argo_cli.format_social_results(
+            payload,
+            max_items=want * 2,
+            max_chars=int(self.config.limits.max_chars),
+        )
+        return {"success": True, "content": text}
+
+    # ── 工具 5：打开网页/公众号/单条推文读正文 ──────────────────────
+
+    @Tool(
+        "argo_fetch",
+        brief_description=(
+            "打开指定 URL（普通网页、游戏攻略贴、微信公众号文章或单条 X/Twitter 推文）提取正文"
+        ),
+        detailed_description=(
+            "当群友发了一个链接让你看，或者你在 argo_search 里看到某篇攻略/文章想细读时调用。\n"
+            "- 自动识别 mp.weixin.qq.com 链接并走公众号专用全文提取；\n"
+            "- 自动识别 x.com / twitter.com 单条推文链接并走免登 Syndication 提取全文与互动数；\n"
+            "- 普通网页支持填 focus 关键词按相关性聚焦提取（省篇幅），"
+            "遇反爬壳页可设 use_browser=true。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="url",
+                param_type=ToolParamType.STRING,
+                description="要读取的公网 http(s):// 链接",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="focus",
+                param_type=ToolParamType.STRING,
+                description="可选：只提取与该关键词相关的段落（BM25 聚焦）",
+                required=False,
+                default="",
+            ),
+            ToolParameterInfo(
+                name="use_browser",
+                param_type=ToolParamType.BOOLEAN,
+                description="普通抓取为空或遇知乎等登录站点时设为 true 启用浏览器通道",
+                required=False,
+                default=False,
+            ),
+        ],
+        visibility="visible",
+    )
+    async def handle_fetch(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.config.plugin.enabled:
+            return fail("Argo 检索桥接器已在配置中关闭。")
+
+        url = str(kwargs.get("url") or "").strip()
+        if not image_helper.is_public_http_url(url):
+            return fail("url 仅接受公网 http:// 或 https:// 链接。")
+
+        focus = str(kwargs.get("focus") or "").strip()
+        use_browser = bool(kwargs.get("use_browser", False))
+        max_chars = max(800, int(self.config.limits.max_chars) * 2)
+
+        lower_url = url.lower()
+        # 1. 单条推文直链 -> 走 twitter_syndication
+        if lower_url.startswith(_TWEET_URL_PREFIXES) and "/status/" in lower_url:
+            payload = await self._get_worker().call_tool(
+                "argo_search",
+                {
+                    "query": url,
+                    "engine": "twitter_syndication",
+                    "max_results": 1,
+                    "include_local": False,
+                },
+                timeout=float(self.config.argo.timeout_seconds),
+            )
+            if payload.get("error"):
+                return fail(f"推文读取失败：{payload['error']}")
+            return {
+                "success": True,
+                "content": argo_cli.format_results(payload, max_items=1, max_chars=max_chars),
+            }
+
+        # 2. 微信公众号文章 -> 走 argo_article
+        if _WEIXIN_HOST in lower_url:
+            payload = await self._get_worker().call_tool(
+                "argo_article",
+                {"url": url, "max_chars": max_chars},
+                timeout=max(30.0, float(self.config.argo.timeout_seconds)),
+            )
+            if payload.get("error"):
+                return fail(f"公众号文章提取失败：{payload['error']}")
+            title = str(payload.get("title") or "公众号文章").strip()
+            author = str(payload.get("author") or "").strip()
+            pub_time = str(payload.get("publish_time") or "").strip()
+            content = str(payload.get("content") or payload.get("raw_text") or "").strip()
+            if len(content) > max_chars:
+                content = content[:max_chars].rstrip() + "…"
+            meta_line = " · ".join(p for p in (author, pub_time) if p)
+            header = f"《{title}》" + (f"（{meta_line}）" if meta_line else "")
+            return {"success": True, "content": f"{header}\n{content}"}
+
+        # 3. 通用网页 -> 走 argo_fetch
+        args: dict[str, Any] = {
+            "url": url,
+            "mode": "text",
+            "max_chars": max_chars,
+            "use_browser": use_browser,
+        }
+        if focus:
+            args["focus"] = focus
+        payload = await self._get_worker().call_tool(
+            "argo_fetch",
+            args,
+            timeout=max(30.0, float(self.config.argo.timeout_seconds)),
+        )
+        if payload.get("error"):
+            return fail(f"网页读取失败：{payload['error']}")
+        title = str(payload.get("title") or url).strip()
+        content = str(
+            payload.get("content") or payload.get("text") or payload.get("raw_text") or ""
+        ).strip()
+        if not content:
+            return fail("未能从该页面提取到有效正文，可尝试设 use_browser=true 重试。")
+        if len(content) > max_chars:
+            content = content[:max_chars].rstrip() + "…"
+        return {"success": True, "content": f"【{title}】\n{content}\n来源：{url}"}
+
+    # ── 工具 6：后台长任务（跑完主动携带摘要唤醒麦麦） ──────────────
 
     @Tool(
         "argo_job",
-        brief_description="提交或查看本机长任务（深度研究、站点抓取、PDF 与论文深读）",
+        brief_description=(
+            "提交或管理耗时较长的后台深扒任务（多源深度研究、整站抓取、长 PDF 提取），"
+            "跑完自动唤醒你汇报"
+        ),
         detailed_description=(
-            "需要几分钟以上的任务用这个工具，不要用 argo_lookup 硬等。\n"
-            "action=submit 提交任务：task 选 research（深度研究，出一份综合报告）、"
-            "crawl（抓整站）、pdf（读一个 PDF 链接）、paper（读 arXiv 论文）、"
-            "article（读公众号文章）；target 填查询词或链接。提交后立刻返回作业号，"
-            "任务在后台独立进程里跑，先告诉群友「已经在查，稍后播报」。\n"
-            "action=status 查看进度与日志尾部；action=list 列出最近的作业；"
-            "action=cancel 取消。\n"
-            "用法示例：先 submit，过一会儿用同一个 job_id 调 status，跑完把结论转述出来。"
+            "需要跨多源深扒一个复杂话题（research）、抓整站（crawl）或解析大 PDF（pdf）时调用。\n"
+            "action=submit 提交后立刻返回 job_id，任务在后台独立进程执行；"
+            "先告诉群友『已经在后台深扒了，跑完跟你说』——"
+            "插件监控到任务完成后会自动携带结果摘要唤醒你汇报，无需你在原地死等。\n"
+            "也可随时用 action=status / list / cancel 查看或取消。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -362,27 +999,31 @@ class ArgoLookup(MaiBotPlugin):
             ToolParameterInfo(
                 name="task",
                 param_type=ToolParamType.STRING,
-                description="任务类型，仅 submit 时需要",
+                description="任务类型，仅 submit 时必填",
                 enum_values=list(argo_cli.JOB_TASKS),
                 required=False,
             ),
             ToolParameterInfo(
                 name="target",
                 param_type=ToolParamType.STRING,
-                description="查询词或链接，仅 submit 时需要",
+                description="研究主题或目标链接，仅 submit 时必填",
                 required=False,
             ),
             ToolParameterInfo(
                 name="job_id",
                 param_type=ToolParamType.STRING,
-                description="作业号，status 与 cancel 时填",
+                description="作业号，status 与 cancel 时可填（status 留空默认查最新一条）",
                 required=False,
             ),
         ],
         visibility="visible",
     )
-    async def handle_job(self, **kwargs: Any) -> dict:
+    async def handle_job(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.config.plugin.enabled:
+            return fail("Argo 检索桥接器已在配置中关闭。")
+
         action = str(kwargs.get("action") or "status").strip().lower()
+        stream_id = str(kwargs.get("stream_id") or "")
         job_root = self._job_root()
 
         if action == "submit":
@@ -393,16 +1034,20 @@ class ArgoLookup(MaiBotPlugin):
                 job_root,
                 task,
                 target,
+                stream_id=stream_id,
                 **self._argo_kwargs(),
             )
             if meta.get("error"):
                 return fail(f"提交失败：{meta['error']}")
+            job_id = str(meta["job_id"])
+            if stream_id and self.config.jobs.proactive_notify:
+                watch_task = asyncio.create_task(self._watch_job_and_notify(job_id, stream_id))
+                self._watch_tasks[job_id] = watch_task
             return {
                 "success": True,
                 "content": (
-                    f"已提交作业 {meta['job_id']}（{meta['task']}：{meta['target']}）。"
-                    f"它在后台独立进程里跑，先告诉群友已经开始了；"
-                    f"过一会儿用 argo_job action=status job_id={meta['job_id']} 取结果。"
+                    f"已提交后台作业 {job_id}（{meta['task']}：{meta['target']}）。"
+                    "任务正在后台独立进程运行，跑完后会自动携带摘要唤醒你汇报；现在先跟群友说一声即可。"
                 ),
             }
 
@@ -421,6 +1066,9 @@ class ArgoLookup(MaiBotPlugin):
         if action == "cancel":
             if not job_id:
                 return fail("要取消哪个作业？请给 job_id。")
+            watch = self._watch_tasks.pop(job_id, None)
+            if watch is not None:
+                watch.cancel()
             result = await asyncio.to_thread(argo_cli.cancel_job, job_root, job_id)
             if result.get("error"):
                 return fail(result["error"])
@@ -465,4 +1113,4 @@ class ArgoLookup(MaiBotPlugin):
 
 def create_plugin() -> MaiBotPlugin:
     """宿主靠这个工厂拿插件实例。"""
-    return ArgoLookup()
+    return ArgoPlugin()

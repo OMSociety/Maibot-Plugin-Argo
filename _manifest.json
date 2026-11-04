@@ -1,16 +1,19 @@
 {
   "manifest_version": 2,
-  "id": "omsociety.argo-lookup",
+  "id": "omsociety.argo",
   "version": "1.0.0",
-  "name": "Argo 检索",
-  "description": "把本机 argo 的检索与长任务能力交给麦麦：按问题类型选源（中文综合、时事、中文期刊题录、社科全文、外文文献、DOI 全文、书目、配图、GitHub），长任务提交即返回、稍后取结果",
+  "name": "Argo 检索桥接器",
+  "description": "面向麦麦的网上冲浪、热梗溯源、ACG与游戏百科、玩家社区风评、正向找图与以图搜图工具箱，支持搜图缩略图视觉回传与长耗时任务后台跑完主动唤醒汇报",
   "author": {
     "name": "OMSociety",
     "url": "https://github.com/OMSociety"
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/OMSociety/Maibot-Plugin-Argo-Lookup"
+    "repository": "https://github.com/OMSociety/Maibot-Plugin-Argo",
+    "homepage": "https://github.com/OMSociety/Maibot-Plugin-Argo",
+    "documentation": "https://github.com/OMSociety/Maibot-Plugin-Argo/blob/main/README.md",
+    "issues": "https://github.com/OMSociety/Maibot-Plugin-Argo/issues"
   },
   "host_application": {
     "min_version": "1.3.0",
@@ -29,7 +32,12 @@
       "background": "#FDC27D"
     }
   },
-  "capabilities": [],
+  "capabilities": [
+    "maisaka.context.resolve_image",
+    "maisaka.proactive.trigger",
+    "message.get_by_id",
+    "message.get_recent"
+  ],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [

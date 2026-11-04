@@ -1,4 +1,4 @@
-"""argo_cli 的纯逻辑测试：选源、模式收敛、排版、作业协议。"""
+"""argo_cli 的纯逻辑测试：冲浪/ACG/热榜选源、模式收敛、排版、作业协议。"""
 
 import json
 import os
@@ -32,15 +32,15 @@ class TestResolveEngine:
     def test_free_engine_ignores_paid_switch(self):
         assert argo_cli.resolve_engine("code", False, "maibot 插件") == ("github", "")
 
-    def test_doi_without_doi_uses_academic_cn(self):
-        engine, note = argo_cli.resolve_engine("doi", True, "社会资本 综述")
-        assert engine == "metaso_scholar"
-        assert "DOI" in note
-
-    def test_doi_with_doi_uses_unpaywall(self):
-        engine, note = argo_cli.resolve_engine("doi", True, "10.1000/xyz123")
-        assert engine == "unpaywall"
+    def test_explicit_engine_overrides_kind(self):
+        engine, note = argo_cli.resolve_engine("web", True, "孤独摇滚", explicit_engine="bangumi")
+        assert engine == "bangumi"
         assert note == ""
+
+    def test_explicit_paid_engine_downgrades_when_disabled(self):
+        engine, note = argo_cli.resolve_engine("web", False, "AI news", explicit_engine="tavily")
+        assert engine == "metaso"
+        assert "计费源" in note
 
 
 class TestNormalizeMode:
@@ -54,7 +54,7 @@ class TestNormalizeMode:
 
     def test_every_kind_resolves_to_a_known_engine(self):
         for kind in argo_cli.ENGINE_MAP:
-            assert argo_cli.resolve_engine(kind, True, "10.1/x")[0]
+            assert argo_cli.resolve_engine(kind, True, "test")[0]
 
 
 class TestKindSpec:
@@ -63,20 +63,37 @@ class TestKindSpec:
         assert set(argo_cli.ENGINE_MAP) == {
             "web",
             "news",
-            "academic_cn",
-            "fulltext_cn",
-            "academic_en",
-            "doi",
-            "book",
-            "image",
+            "meme",
+            "slang_en",
+            "anime",
+            "game",
+            "baike",
+            "wiki",
+            "video",
+            "music",
+            "hot_bili",
+            "hot_weibo",
+            "hot_zhihu",
+            "hot_douyin",
             "code",
-            "tech_en",
+            "web_en",
         }
 
 
 class TestFormatResults:
     def test_empty_results_get_advice(self):
         assert "没有搜到结果" in argo_cli.format_results({"results": []})
+
+    def test_filters_out_local_files_source(self):
+        payload = {
+            "results": [
+                {"title": "本机机密文件", "source": "local_files", "url": "file:///C:/secret.txt"},
+                {"title": "公开网页", "source": "metaso", "url": "https://example.org/a"},
+            ]
+        }
+        text = argo_cli.format_results(payload)
+        assert "本机机密文件" not in text
+        assert "公开网页" in text
 
     def test_renders_title_source_and_url(self):
         payload = {
@@ -115,6 +132,27 @@ class TestFormatResults:
         assert argo_cli.format_results(payload, max_chars=0)
 
 
+class TestFormatSocialResults:
+    def test_formats_social_posts_with_sentiment(self):
+        payload = {
+            "sentiment_summary": {"summary": "玩家普遍好评"},
+            "results": [
+                {
+                    "platform": "bilibili",
+                    "author": "UP主甲",
+                    "title": "黑神话隐藏Boss无伤攻略",
+                    "text": "详细打法如下",
+                    "url": "https://www.bilibili.com/video/BV1xx",
+                    "published_at": "2026-11-01",
+                }
+            ],
+        }
+        text = argo_cli.format_social_results(payload)
+        assert "【舆情速览】玩家普遍好评" in text
+        assert "[bilibili] @UP主甲" in text
+        assert "https://www.bilibili.com/video/BV1xx" in text
+
+
 class TestJobProtocol:
     def test_bad_task_is_rejected_before_touching_disk(self, tmp_path):
         result = argo_cli.submit_job(tmp_path, "nope", "x")
@@ -128,14 +166,23 @@ class TestJobProtocol:
     def test_status_of_missing_job_reports_error(self, tmp_path):
         assert "没有这个作业" in argo_cli.job_status(tmp_path, "260101-000000-abcd")["error"]
 
-    def test_status_reads_rc_file(self, tmp_path):
+    def test_status_reads_rc_and_notified_flag(self, tmp_path):
         job_dir = tmp_path / "260101-000000-abcd"
         job_dir.mkdir()
-        (job_dir / "meta.json").write_text(json.dumps({"task": "research"}), encoding="utf-8")
+        (job_dir / "meta.json").write_text(
+            json.dumps({"task": "research", "stream_id": "s1", "notified": False}),
+            encoding="utf-8",
+        )
         (job_dir / "rc").write_text("0", encoding="utf-8")
         info = argo_cli.job_status(tmp_path, job_dir.name)
         assert info["state"] == "done"
         assert info["rc"] == 0
+        assert info["stream_id"] == "s1"
+        assert info["notified"] is False
+
+        argo_cli.mark_job_notified(tmp_path, job_dir.name)
+        info2 = argo_cli.job_status(tmp_path, job_dir.name)
+        assert info2["notified"] is True
 
     def test_status_of_dead_process_without_rc_is_lost(self, tmp_path):
         job_dir = tmp_path / "260101-000000-abcd"

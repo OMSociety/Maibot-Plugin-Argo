@@ -619,6 +619,8 @@ class ArgoPlugin(MaiBotPlugin):
         detailed_description=(
             "当群友发了一张图问『这是谁』『出自哪部番』『求画师/原图/P站ID』时调用。\n"
             f"必选 engine：{_REVERSE_HINT}。\n"
+            "二次元图（插画、动漫截图、角色立绘）按顺序试：saucenao → animetrace，"
+            "两者都返回空才用 google_lens。\n"
             "图片获取方式：\n"
             "1. 搜聊天里的图（最常用）：传目标图片所在消息的 msg_id"
             "（留空则自动找当前会话最新一张图），三条引擎都吃得下；\n"

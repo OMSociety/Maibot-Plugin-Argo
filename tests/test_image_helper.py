@@ -50,3 +50,12 @@ def test_unwrap_message_handles_capability_envelope():
 def test_looks_like_image_rejects_short_or_unknown_bytes():
     assert image_helper.looks_like_image(b"LONGMARCHLONG") is False
     assert image_helper.looks_like_image(b"\xff\xd8\xff\xe0" + b"0" * 16) is True
+
+
+def test_referer_follows_image_host():
+    assert image_helper._referer_for("https://cdn.donmai.us/orig/ab/cd.png") == (
+        "https://danbooru.donmai.us/"
+    )
+    assert image_helper._referer_for("https://i.pximg.net/img/x.png") == "https://www.pixiv.net/"
+    assert image_helper._referer_for("https://pbs.twimg.com/media/x.jpg") == "https://x.com/"
+    assert image_helper._referer_for("https://example.com/a.jpg") == ""

@@ -35,6 +35,39 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+# 图床与图站普遍校验防盗链；按图源域名给出对应站点的 Referer。
+_REFERER_BY_HOST: tuple[tuple[str, str], ...] = (
+    ("saucenao.com", "https://saucenao.com/"),
+    ("pximg.net", "https://www.pixiv.net/"),
+    ("pixiv.net", "https://www.pixiv.net/"),
+    ("donmai.us", "https://danbooru.donmai.us/"),
+    ("hdslb.com", "https://www.bilibili.com/"),
+    ("bilibili.com", "https://www.bilibili.com/"),
+    ("twimg.com", "https://x.com/"),
+    ("x.com", "https://x.com/"),
+    ("fanbox.cc", "https://www.pixiv.net/"),
+    ("fantia.jp", "https://fantia.jp/"),
+    ("artstation.com", "https://www.artstation.com/"),
+    ("deviantart.net", "https://www.deviantart.com/"),
+    ("deviantart.com", "https://www.deviantart.com/"),
+    ("steamstatic.com", "https://store.steampowered.com/"),
+    ("steamcommunity.com", "https://steamcommunity.com/"),
+    ("sinaimg.cn", "https://weibo.com/"),
+    ("zhimg.com", "https://www.zhihu.com/"),
+    ("doubanio.com", "https://www.douban.com/"),
+    ("yande.re", "https://yande.re/"),
+    ("konachan", "https://konachan.com/"),
+)
+
+
+def _referer_for(image_url: str) -> str:
+    """按图源域名挑 Referer，没有匹配时返回空串。"""
+    lowered = (image_url or "").strip().lower()
+    for host, referer in _REFERER_BY_HOST:
+        if host in lowered:
+            return referer
+    return ""
+
 
 def is_public_http_url(url: str) -> bool:
     """校验是否为非回环、非内网的公网 http(s) URL。"""
@@ -333,12 +366,9 @@ async def download_image_as_content_item(
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
-    if "saucenao.com" in image_url:
-        headers["Referer"] = "https://saucenao.com/"
-    elif "pximg.net" in image_url or "pixiv.net" in image_url:
-        headers["Referer"] = "https://www.pixiv.net/"
-    elif "hdslb.com" in image_url or "bilibili.com" in image_url:
-        headers["Referer"] = "https://www.bilibili.com/"
+    referer = _referer_for(image_url)
+    if referer:
+        headers["Referer"] = referer
 
     client_kwargs: dict[str, Any] = {
         "headers": headers,

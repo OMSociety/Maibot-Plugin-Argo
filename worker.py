@@ -73,6 +73,14 @@ class ArgoWorker:
         env = dict(os.environ)
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        # 宿主以 PYTHONSAFEPATH=1 启动时，子进程不会把脚本所在目录放进 sys.path，
+        # mcp_server.py 的 `from mcp_handlers import ...` 会直接失败；
+        # 这里显式去掉该开关并把 Argo 的两个模块根目录前插到 PYTHONPATH。
+        env.pop("PYTHONSAFEPATH", None)
+        module_roots = [str(Path(self.argo_dir) / "scripts"), str(Path(self.argo_dir))]
+        existing = env.get("PYTHONPATH") or ""
+        prefix = os.pathsep.join(module_roots)
+        env["PYTHONPATH"] = f"{prefix}{os.pathsep}{existing}" if existing else prefix
         if self.argo_env_file:
             env["ARGO_ENV_FILE"] = self.argo_env_file
         Path(self.temp_image_root).mkdir(parents=True, exist_ok=True)

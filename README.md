@@ -89,16 +89,16 @@
 ## 安装与配置
 
 1. 将本仓库放置或软链接到 `MaiBot/plugins/omsociety_argo/`。
-2. 确认本机已安装 [argo](https://github.com/taxueseek/argo)（默认路径 `C:\Users\Administrator\argo`），且密钥存放在 `%APPDATA%\argo\env`。
+2. 确认本机已安装 [argo](https://github.com/taxueseek/argo)：默认取环境变量 `ARGO_ROOT`，没有则用用户目录下的 `argo`；密钥文件默认 `%APPDATA%\argo\env`。
 3. 启动或重载 MaiBot。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `plugin.enabled` | `true` | 是否启用插件 |
-| `argo.root` | `C:\Users\Administrator\argo` | 本机 Argo 仓库根目录 |
-| `argo.python` | Python 3.13 路径 | 启动常驻 Worker 与作业使用的 Python 解释器 |
+| `argo.root` | `%USERPROFILE%\argo` | Argo 仓库根目录（可用 `ARGO_ROOT` 覆盖） |
+| `argo.python` | 当前进程解释器 | 启动常驻 Worker 与作业使用的 Python 解释器，须装有 argo 的运行依赖（可用 `ARGO_PYTHON` 覆盖） |
 | `argo.env_file` | 空 | 留空默认读取 `%APPDATA%\argo\env` |
-| `argo.proxy` | `http://127.0.0.1:7897` | 下载搜图与反搜预览图片时使用的 HTTP 代理（填 `direct` 则直连） |
+| `argo.proxy` | 空 | 下载搜图与反搜预览图片时使用的 HTTP 代理（留空直连，也可填 `direct`） |
 | `argo.mode` | `fast` | 检索模式：`fast` / `auto` / `deep` / `budget` |
 | `argo.timeout_seconds` | `25` | 单次同步检索超时秒数 |
 | `limits.max_results` | `5` | 默认返回条数（1–10） |

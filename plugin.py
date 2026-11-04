@@ -75,14 +75,17 @@ class ArgoSection(PluginConfigBase):
     __ui_order__ = 1
 
     root: str = Field(
-        default=r"C:\Users\Administrator\argo",
+        default=str(argo_cli.DEFAULT_ROOT),
         description="argo 仓库目录（须包含 bin/argo 与 scripts/mcp_server.py）",
-        json_schema_extra={"label": "argo 目录", "hint": "换机器时改这里"},
+        json_schema_extra={"label": "argo 目录", "hint": "留空则取 ARGO_ROOT 或用户目录下的 argo"},
     )
     python: str = Field(
         default=argo_cli.DEFAULT_PYTHON,
         description="启动 argo 常驻 Worker 用的 Python 解释器路径（需装有 curl_cffi 等依赖）",
-        json_schema_extra={"label": "Python 解释器", "hint": "留空走系统 Python 3.13"},
+        json_schema_extra={
+            "label": "Python 解释器",
+            "hint": "留空取 ARGO_PYTHON，再退回当前进程解释器",
+        },
     )
     env_file: str = Field(
         default="",
@@ -90,7 +93,7 @@ class ArgoSection(PluginConfigBase):
         json_schema_extra={"label": "密钥文件", "hint": "留空走默认位置"},
     )
     proxy: str = Field(
-        default="http://127.0.0.1:7897",
+        default="",
         description="下载搜图/反搜预览缩略图时使用的 HTTP 代理（填 direct 则直连）",
         json_schema_extra={"label": "图片下载代理"},
     )

@@ -4,11 +4,12 @@
 
 ## 定位与运行面
 
-- **代码仓库**：`D:\WorkSpace\Github\Maibot-Plugin-Argo`
-- **宿主加载路径（Windows Junction 软链）**：`D:\ArtificialIntelligence\Maibot\MaiBot\plugins\omsociety_argo` -> `D:\WorkSpace\Github\Maibot-Plugin-Argo`
-- **宿主环境**：MaiBot 1.3.15（OneKey 部署），`maibot-plugin-sdk` 2.16.0；宿主解释器位于 `D:\ArtificialIntelligence\Maibot\MaiBot\.onekey\environments\288559bb-a676-412d-a862-3f44677925c2\python.exe`。
-- **底层 Argo 引擎**：`C:\Users\Administrator\argo`（分支 `local/runtime`），由系统 Python 3.13（`C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe`）驱动；密钥文件位于 `C:\Users\Administrator\AppData\Roaming\argo\env`。
-- **运行期数据目录**：`D:\ArtificialIntelligence\Maibot\MaiBot\data\plugins\omsociety.argo\`（含后台作业目录 `jobs\` 与聊天图片暂存目录 `temp_images\`，均不入库）。
+- **代码仓库**：本目录（`<仓库根>`）。
+- **宿主加载路径**：`<MaiBot 实例>/plugins/omsociety_argo`，可指向本目录的目录联接。
+- **宿主环境**：MaiBot 1.3.x（OneKey 部署）与 `maibot-plugin-sdk` 2.16.0；宿主解释器为实例 `venv` 或 `.onekey/environments/<id>/python.exe`。
+- **底层 Argo 引擎**：`<argo 目录>`（默认取环境变量 `ARGO_ROOT`，没有则用 `%USERPROFILE%\argo`），由一个装有 argo 运行依赖的 Python 3.13 解释器驱动，路径通过配置项 `argo.python` 或环境变量 `ARGO_PYTHON` 指定。
+- **密钥文件**：`%APPDATA%\argo\env`（`ARGO_*`、`TWITTER_*`）。
+- **运行期数据目录**：`<MaiBot 实例>/data/plugins/omsociety.argo/`（含后台作业目录 `jobs/` 与聊天图片暂存目录 `temp_images/`，均不入库）。
 
 ## 文件职责
 
@@ -32,8 +33,8 @@
 ## 验收命令（在仓库根目录执行）
 
 ```powershell
-Set-Location "D:\WorkSpace\Github\Maibot-Plugin-Argo"
-$py = "C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe"
+Set-Location "<仓库根>"
+$py = "<装有 pytest 与 ruff 的 Python 解释器>"
 
 & $py -m ruff format --check .
 & $py -m ruff check .
@@ -45,10 +46,9 @@ $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
 宿主侧导入与清单校验：
 
 ```powershell
-$hostPy = "D:\ArtificialIntelligence\Maibot\MaiBot\.onekey\environments\288559bb-a676-412d-a862-3f44677925c2\python.exe"
-$env:PYTHONPATH = "D:\WorkSpace\Github\Maibot-Plugin-Argo"
+$hostPy = "<MaiBot 实例的宿主解释器>"
+$env:PYTHONPATH = "<仓库根>"
 & $hostPy -c "import plugin; p = plugin.create_plugin(); print(type(p).__name__, len(plugin.argo_cli.ENGINE_MAP))"
-& $py "C:\Users\Administrator\.dsh\skills\maibot-plugin-creator\scripts\check_plugin.py" "D:\WorkSpace\Github\Maibot-Plugin-Argo"
 ```
 
-通过标准：`ruff format --check` 无差异、`ruff check` 0 warning、`pytest` 全绿、`check_plugin.py` 0 error。
+通过标准：`ruff format --check` 无差异、`ruff check` 0 warning、`pytest` 全绿、宿主侧导入打印 `ArgoPlugin` 与 16。

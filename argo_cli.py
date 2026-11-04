@@ -18,8 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
-DEFAULT_ROOT = Path(r"C:\Users\Administrator\argo")
-DEFAULT_PYTHON = r"C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe"
+DEFAULT_ROOT = Path(os.environ.get("ARGO_ROOT") or (Path.home() / "argo"))
+DEFAULT_PYTHON = os.environ.get("ARGO_PYTHON", "")
 
 
 class KindSpec(NamedTuple):

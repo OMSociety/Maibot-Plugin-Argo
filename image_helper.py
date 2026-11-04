@@ -57,8 +57,40 @@ def is_public_http_url(url: str) -> bool:
     return True
 
 
+_B64_CHARS_RE = re.compile(r"^[A-Za-z0-9+/\s=]+$")
+_IMAGE_MAGIC = (b"\xff\xd8", b"\x89PNG", b"GIF8", b"BM")
+
+
+def looks_like_image(data: bytes) -> bool:
+    """按文件头判断是否 JPEG/PNG/GIF/BMP/WebP。"""
+    if len(data) < 12:
+        return False
+    if data.startswith(_IMAGE_MAGIC):
+        return True
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def _sniff_format(data: bytes) -> str:
+    """按文件头给出格式名，用于决定落盘后缀。"""
+    if data.startswith(b"\xff\xd8"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG"):
+        return "png"
+    if data.startswith(b"GIF8"):
+        return "gif"
+    if data.startswith(b"BM"):
+        return "bmp"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return "jpeg"
+
+
 def decode_base64_image(raw_base64: str) -> tuple[str, bytes] | None:
-    """解析普通 Base64 或 data:image/...;base64 字符串。"""
+    """解析普通 Base64 或 data:image/...;base64 字符串。
+
+    只接受纯 Base64 字符集：宿主在未请求二进制时会把图片段写成文字描述，
+    宽松解码会把描述里的 ASCII 片段当成数据，产出一段非图片字节。
+    """
     normalized = str(raw_base64 or "").strip()
     if not normalized:
         return None
@@ -71,13 +103,18 @@ def decode_base64_image(raw_base64: str) -> tuple[str, bytes] | None:
     if match is not None:
         image_format = match.group("fmt").lower()
         normalized = match.group("data").strip()
+    compact = "".join(normalized.split())
+    if not compact or not _B64_CHARS_RE.match(compact):
+        return None
+    if len(compact) % 4 != 0:
+        compact += "=" * (-len(compact) % 4)
     try:
-        image_bytes = b64decode(normalized, validate=False)
+        image_bytes = b64decode(compact, validate=True)
     except Exception:
         return None
-    if len(image_bytes) < 16:
+    if not looks_like_image(image_bytes):
         return None
-    return image_format, image_bytes
+    return _sniff_format(image_bytes) or image_format, image_bytes
 
 
 def _iter_image_reference_values(value: Any) -> list[str]:
@@ -160,6 +197,20 @@ def normalize_image_bytes(
         return None
 
 
+def _unwrap_message(response: Any) -> dict[str, Any] | None:
+    """把 message.get_by_id 的信封拆成消息字典。"""
+    if not isinstance(response, dict):
+        return None
+    if response.get("success") is False:
+        return None
+    inner = response.get("message")
+    if isinstance(inner, dict):
+        return inner
+    if "raw_message" in response:
+        return response
+    return None
+
+
 async def resolve_chat_image_to_file(
     ctx: Any,
     *,
@@ -174,6 +225,7 @@ async def resolve_chat_image_to_file(
     idx = max(0, int(image_index or 0))
     image_bytes: bytes | None = None
     ext = "jpg"
+    source = ""
 
     # 通道 1：指定了 msg_id 时优先走 maisaka.context.resolve_image
     # （支持模型可见的短编号与 tool_result 引用）
@@ -187,21 +239,25 @@ async def resolve_chat_image_to_file(
                     decoded = decode_base64_image(b64)
                     if decoded is not None:
                         ext, image_bytes = decoded
+                        source = "context.resolve_image"
         except Exception as exc:
             logger.debug("maisaka.context.resolve_image 未命中: %s", exc)
 
     # 通道 2：指定了 msg_id 但通道 1 未命中时，回退 message.get_by_id
     if image_bytes is None and target_msg:
         try:
-            msg_dict = await ctx.message.get_by_id(
-                target_msg,
-                chat_id=target_stream,
-                include_binary_data=True,
+            msg_dict = _unwrap_message(
+                await ctx.message.get_by_id(
+                    target_msg,
+                    chat_id=target_stream,
+                    include_binary_data=True,
+                )
             )
-            if isinstance(msg_dict, dict):
+            if msg_dict is not None:
                 imgs = extract_message_images(msg_dict)
                 if 0 <= idx < len(imgs):
                     ext, image_bytes = imgs[idx]
+                    source = "message.get_by_id"
                 elif imgs:
                     return (
                         None,
@@ -225,16 +281,19 @@ async def resolve_chat_image_to_file(
                 cand_id = str(candidate.get("message_id") or candidate.get("msg_id") or "").strip()
                 imgs = extract_message_images(candidate)
                 if not imgs and cand_id:
-                    full_msg = await ctx.message.get_by_id(
-                        cand_id,
-                        chat_id=target_stream,
-                        include_binary_data=True,
+                    full_msg = _unwrap_message(
+                        await ctx.message.get_by_id(
+                            cand_id,
+                            chat_id=target_stream,
+                            include_binary_data=True,
+                        )
                     )
-                    if isinstance(full_msg, dict):
+                    if full_msg is not None:
                         imgs = extract_message_images(full_msg)
                 if imgs:
                     pick_idx = idx if 0 <= idx < len(imgs) else 0
                     ext, image_bytes = imgs[pick_idx]
+                    source = f"message.get_recent:{cand_id}"
                     break
         except Exception as exc:
             logger.debug("message.get_recent 扫描图片失败: %s", exc)
@@ -244,10 +303,17 @@ async def resolve_chat_image_to_file(
             return None, f"未能在消息 {target_msg} 中找到可读取的图片。"
         return None, "当前会话最近消息中没有找到图片，也没有提供公网 image_url。"
 
-    norm_ext = "png" if ext == "png" else ("webp" if ext == "webp" else "jpg")
+    norm_ext = ext if ext in ("png", "webp", "gif", "bmp") else "jpg"
     temp_dir.mkdir(parents=True, exist_ok=True)
     out_path = temp_dir / f"argo_chat_{uuid.uuid4().hex[:10]}.{norm_ext}"
     out_path.write_bytes(image_bytes)
+    logger.info(
+        "反搜取图 msg_id=%s channel=%s bytes=%d sha256=%s",
+        target_msg or "-",
+        source or "unknown",
+        len(image_bytes),
+        hashlib.sha256(image_bytes).hexdigest()[:16],
+    )
     return out_path, None
 
 

@@ -621,9 +621,8 @@ class ArgoPlugin(MaiBotPlugin):
             f"必选 engine：{_REVERSE_HINT}。\n"
             "图片获取方式：\n"
             "1. 搜聊天里的图（最常用）：传目标图片所在消息的 msg_id"
-            "（留空则自动找当前会话最新一张图），无需填 image_url；\n"
-            "2. 搜公网图片链接：直接填 image_url"
-            "（google_lens 仅支持公网图片链接，聊天本地图请选 saucenao 或 animetrace）。\n"
+            "（留空则自动找当前会话最新一张图），三条引擎都吃得下；\n"
+            "2. 搜公网图片链接：直接填 image_url。\n"
             "插件会把匹配结果首条缩略图放入 content_items 供你亲眼核对与用 attach_pic 发出。"
         ),
         parameters=[
@@ -632,7 +631,7 @@ class ArgoPlugin(MaiBotPlugin):
                 param_type=ToolParamType.STRING,
                 description=(
                     "反搜引擎：saucenao（二次元原图/画师首选）/ animetrace（认动漫角色与番名）"
-                    "/ google_lens（通用识图，仅限公网直链）"
+                    "/ google_lens（通用识图：真人照片、梗图原图、商品与场景）"
                 ),
                 enum_values=list(argo_cli.REVERSE_IMAGE_ENGINES.keys()),
                 default="saucenao",
@@ -701,11 +700,6 @@ class ArgoPlugin(MaiBotPlugin):
                 )
             query_target = raw_url
         else:
-            if engine == "google_lens":
-                return fail(
-                    "google_lens 仅支持公网图片直链（SerpAPI 无本地上传接口）；"
-                    "搜聊天里的图请改用 saucenao 或 animetrace。"
-                )
             temp_file, err = await image_helper.resolve_chat_image_to_file(
                 self.ctx,
                 stream_id=stream_id,

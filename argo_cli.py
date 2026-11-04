@@ -56,7 +56,7 @@ ENGINE_MAP: dict[str, KindSpec] = {
 REVERSE_IMAGE_ENGINES: dict[str, str] = {
     "saucenao": "二次元插画、动漫图、立绘、同人图找 Pixiv/Twitter 原图出处与画师（首选）",
     "animetrace": "动画截图、番剧画面、Galgame 截图识别具体角色名与所属作品名",
-    "google_lens": "三次元照片、梗图原图、电影画面、游戏截图、周边商品与通用识图（需公网图片直链）",
+    "google_lens": "三次元照片、梗图原图、电影画面、游戏截图、周边商品与场景通用识图",
 }
 
 # 允许作为长任务提交的 argo 子命令

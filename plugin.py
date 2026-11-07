@@ -517,8 +517,11 @@ class ArgoPlugin(MaiBotPlugin):
             "插件会自动下载前几张可用图片并作为工具图片结果（content_items）放入你的视觉上下文："
             "你不仅能亲眼看到搜出来的图对不对，还能在 reply 工具里用 attach_pic="
             '"tool_result:<call_id>:1" 把看中的图直接发给群友！\n'
-            f"引擎选路：{_IMAGE_HINT}。按角色名或作品名找 Pixiv 插画时选 pixiv——它按 tag 匹配，"
-            "query 用日文作品名、角色名（如「初音ミク」「後藤ひとり」），多个 tag 空格分隔；"
+            f"引擎选路：{_IMAGE_HINT}。按角色名或作品名找 Pixiv 插画时选 pixiv——query 是标签串，"
+            "空格分隔多个标签，按标签匹配"
+            "（如「東方Project10000users入り フランドール 白タイツ」）；"
+            "标签可为作品名、角色名、题材、服装或 10000users入り 这类收藏夹标签，"
+            "角色名写日文名或中文名都能命中。"
             "描述句与表情包、截图这类体裁词用 metaso_image，中文描述即可。"
             "要看某位画师的作品，query 写 user:<画师 id>、画师:<画师名> 或画师主页链接。"
         ),
@@ -527,9 +530,10 @@ class ArgoPlugin(MaiBotPlugin):
                 name="query",
                 param_type=ToolParamType.STRING,
                 description=(
-                    "搜图关键词：pixiv 按作品、角色、题材的 tag 匹配，写「初音ミク」"
-                    "「後藤ひとり」这类 tag，多个用空格分隔；描述句与表情包、截图这类"
-                    "体裁词用 metaso_image，直接写中文（如「孤独摇滚 后藤一里 表情包」）。"
+                    "搜图关键词：pixiv 写标签串，空格分隔多个标签"
+                    "（如「初音ミク 制服」「東方Project10000users入り フランドール 白タイツ」），"
+                    "作品名、角色名、题材、服装与收藏夹标签都可用，日文名与中文名都能命中；"
+                    "metaso_image 写中文描述（如「孤独摇滚 后藤一里 表情包」）。"
                     "也可写 user:29456671 或 画师:米山舞 浏览某位画师的作品"
                 ),
                 required=True,

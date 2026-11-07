@@ -55,7 +55,7 @@
 ### 2. `argo_image_search`：按关键词搜动漫图、表情包梗图与游戏截图
 
 - `engine` 可选 `metaso_image`（通用配图、梗图与游戏截图，默认）或 `pixiv`（Pixiv 公开插画、同人图、漫画与角色立绘）。
-- `pixiv` 是 tag 检索：`query` 写作品名、角色名、题材的 tag（日文或罗马字最准，如 `初音ミク`、`後藤ひとり`），多个 tag 用空格分隔；「表情包」「截图」这类体裁词只在 `metaso_image` 有意义。
+- `pixiv` 按标签检索：`query` 写标签串，空格分隔多个标签（如 `初音ミク 制服`、`東方Project10000users入り フランドール 白タイツ`）；作品名、角色名、题材、服装与收藏夹标签都可用，角色名的日文名与中文名都能命中。
 - Pixiv 支持按画师浏览：`query` 写 `user:<画师 id>`、`画师:<画师名>` 或 `https://www.pixiv.net/users/<id>`，返回该画师的作品列表；匿名模式下该模式会明确提示需要登录凭证。
 - 插件自动下载前 `max_results`（1–4，默认 2）张可用图片，经 Pillow 校验归一化后写入 `content_items`；Pixiv 预览图保持作品宽高比，作品页作为出处链接。
 - 麦麦可在视觉上下文中直接查看搜到的图片，并在调用 `reply` 时通过 `attach_pic="tool_result:<call_id>:1"` 将选中的图片发到群聊。

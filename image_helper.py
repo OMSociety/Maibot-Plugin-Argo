@@ -28,8 +28,10 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_VISUAL_EDGE = 1600
+# 宿主对工具返回图不做二次压缩，这三种格式原样透传，保留作者上传的分辨率与编码。
+_PASSTHROUGH_FORMATS = {"jpeg": "jpeg", "png": "png", "webp": "webp"}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -187,6 +189,25 @@ def extract_message_images(message: dict[str, Any]) -> list[tuple[str, bytes]]:
                 images.append(decoded)
                 break
     return images
+
+
+def probe_image_bytes(image_bytes: bytes) -> tuple[str, int, int] | None:
+    """只校验并读出尺寸与格式，不重编码；返回 (格式, 宽, 高)。
+
+    仅 JPEG/PNG/WebP 可以原样透传：其余格式（GIF 动画、AVIF 等）交给重编码路径，
+    由 Pillow 落成单帧，避免把宿主不认识的容器直接塞进视觉上下文。
+    """
+    try:
+        with Image.open(BytesIO(image_bytes)) as probe:
+            probe.verify()
+        with Image.open(BytesIO(image_bytes)) as raw:
+            fmt = _PASSTHROUGH_FORMATS.get((raw.format or "").lower())
+            width, height = raw.size
+    except Exception:
+        return None
+    if fmt is None:
+        return None
+    return fmt, width, height
 
 
 def normalize_image_bytes(
@@ -350,15 +371,13 @@ async def resolve_chat_image_to_file(
     return out_path, None
 
 
-async def download_image_as_content_item(
+async def fetch_image_bytes(
     image_url: str,
     *,
-    description: str,
-    name_prefix: str = "argo_img",
     proxy: str | None = None,
     timeout: float = 10.0,
-) -> dict[str, Any] | None:
-    """下载单张公网图片并封装为 Maisaka 可直接查看的 content_item 字典。"""
+) -> bytes | None:
+    """带防盗链与体积上限地取回一张公网图片的原始字节。"""
     if not is_public_http_url(image_url):
         return None
 
@@ -388,15 +407,59 @@ async def download_image_as_content_item(
                     buf.extend(chunk)
                     if len(buf) > MAX_IMAGE_BYTES:
                         return None
-        raw_bytes = bytes(buf)
+        return bytes(buf)
     except Exception as exc:
-        logger.debug("下载预览图片失败 (%s): %s", image_url, exc)
+        logger.debug("下载图片失败 (%s): %s", image_url, exc)
         return None
 
-    normalized = await asyncio.to_thread(normalize_image_bytes, raw_bytes)
-    if normalized is None:
+
+async def download_image_as_content_item(
+    image_url: str,
+    *,
+    description: str,
+    preview_url: str | None = None,
+    name_prefix: str = "argo_img",
+    proxy: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any] | None:
+    """下载单张公网图片并封装为 Maisaka 可直接查看的 content_item 字典。
+
+    JPEG/PNG/WebP 且未超体积上限时原样透传，宿主发出去的就是作者上传的那份；
+    原图超限或取不到时改用 ``preview_url``（引擎给的预览直链），
+    仍不可用才重编码压缩，保证有图可发。
+    """
+    candidates = [image_url]
+    if preview_url and preview_url != image_url:
+        candidates.append(preview_url)
+
+    raw_bytes: bytes | None = None
+    used_url = image_url
+    for candidate in candidates:
+        raw_bytes = await fetch_image_bytes(candidate, proxy=proxy, timeout=timeout)
+        if raw_bytes is not None:
+            used_url = candidate
+            break
+    if raw_bytes is None:
         return None
-    fmt, b64, meta = normalized
+
+    probed = await asyncio.to_thread(probe_image_bytes, raw_bytes)
+    if probed is not None:
+        fmt, width, height = probed
+        b64 = b64encode(raw_bytes).decode("utf-8")
+        meta: dict[str, Any] = {
+            "original_width": width,
+            "original_height": height,
+            "output_width": width,
+            "output_height": height,
+            "passthrough": True,
+        }
+    else:
+        normalized = await asyncio.to_thread(normalize_image_bytes, raw_bytes)
+        if normalized is None:
+            return None
+        fmt, b64, meta = normalized
+        meta = meta | {"passthrough": False}
+
     digest = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:10]
     item_name = f"{name_prefix}_{digest}.{fmt}"
     return {
@@ -405,5 +468,5 @@ async def download_image_as_content_item(
         "mime_type": f"image/{fmt}",
         "name": item_name,
         "description": description,
-        "metadata": meta | {"source_url": image_url},
+        "metadata": meta | {"source_url": used_url},
     }

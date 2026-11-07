@@ -617,6 +617,7 @@ class ArgoPlugin(MaiBotPlugin):
             c_item = await image_helper.download_image_as_content_item(
                 img_url,
                 description=desc,
+                preview_url=str(item.get("image_url_preview") or "").strip() or None,
                 name_prefix=f"imgsearch_{idx}",
                 proxy=proxy,
             )
@@ -783,6 +784,7 @@ class ArgoPlugin(MaiBotPlugin):
             c_item = await image_helper.download_image_as_content_item(
                 thumb_url,
                 description=f"[{engine}] 匹配预览：{title}（出处：{src_url}）",
+                preview_url=str(item.get("image_url_preview") or "").strip() or None,
                 name_prefix=f"rev_{engine}",
                 proxy=self.config.argo.proxy,
             )

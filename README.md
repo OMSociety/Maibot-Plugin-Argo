@@ -21,7 +21,7 @@
 | :--- | :--- |
 | **常驻 NDJSON 守护进程** | 插件启动时拉起单个常驻 `mcp_server.py` 子进程并完成预热，每次调用走毫秒级 stdio NDJSON 通信，超时或异常自动重启自愈 |
 | **麦麦冲浪与 ACG 语义选路** | 内置 16 类娱乐与冲浪语义分类（`meme` 热梗、`slang_en` 英文俚语、`anime` 番剧、`game` Steam 游戏、`baike` 百科、`hot_bili` 等全网实时热榜），同时支持直传底层 `engine` |
-| **正搜与反搜视觉闭环** | 搜配图（`argo_image_search`）与以图搜图（`argo_reverse_image`）均自动下载缩略图并通过 `content_items` 回传给麦麦视觉上下文，麦麦亲眼核对画面后可在 `reply(attach_pic=...)` 直接把图发给群友 |
+| **正搜与反搜视觉闭环** | 搜配图（`argo_image_search`）与以图搜图（`argo_reverse_image`）均自动下载结果图并通过 `content_items` 回传给麦麦视觉上下文，麦麦亲眼核对画面后可在 `reply(attach_pic=...)` 直接把图发给群友 |
 | **聊天图片三通道自动提取** | 反搜聊天图片时依次通过 `maisaka.context.resolve_image`、`message.get_by_id` 与 `message.get_recent` 自动提取目标或最近一张聊天图片，落盘至受 `ARGO_IMAGE_LOCAL_ROOTS` 保护的专属暂存目录 |
 | **后台长任务完成主动唤醒** | `argo_job` 提交独立后台进程后，内置协程自动守候 `rc` 完成信号并调用 `maisaka.proactive.trigger` 携带结果摘要主动唤醒麦麦向群友汇报 |
 
@@ -57,7 +57,7 @@
 - `engine` 可选 `metaso_image`（通用配图、梗图与游戏截图，默认）或 `pixiv`（Pixiv 公开插画、同人图、漫画与角色立绘）。
 - `pixiv` 按标签检索：`query` 写标签串，空格分隔多个标签（如 `初音ミク 制服`、`東方Project10000users入り フランドール 白タイツ`）；作品名、角色名、题材、服装与收藏夹标签都可用，角色名的日文名与中文名都能命中。
 - Pixiv 支持按画师浏览：`query` 写 `user:<画师 id>`、`画师:<画师名>` 或 `https://www.pixiv.net/users/<id>`，返回该画师的作品列表，后面可接标签收窄（如 `画师:ke-ta フランドール`）；匿名模式下该模式会明确提示需要登录凭证。
-- 插件自动下载前 `max_results`（1–4，默认 2）张可用图片，经 Pillow 校验归一化后写入 `content_items`；Pixiv 预览图保持作品宽高比，作品页作为出处链接。
+- 插件自动下载前 `max_results`（1–4，默认 2）张可用图片写入 `content_items`：JPEG/PNG/WebP 原样透传，宿主发出去的就是作者上传的那份；单张上限 16MB，超限或取不到原图时改用引擎给的预览直链。作品页作为出处链接。
 - 麦麦可在视觉上下文中直接查看搜到的图片，并在调用 `reply` 时通过 `attach_pic="tool_result:<call_id>:1"` 将选中的图片发到群聊。
 
 ### 3. `argo_reverse_image`：以图搜图与动漫角色识别

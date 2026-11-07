@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 
@@ -9,11 +10,26 @@ from PIL import Image
 
 import image_helper
 
+ORIGINAL_URL = "https://i.pximg.net/img-original/img/2026/11/07/a_p0.jpg"
+PREVIEW_URL = "https://i.pximg.net/c/600x1200_90/img-master/img/2026/11/07/a_p0_master1200.jpg"
+
 
 def _png_base64(size: tuple[int, int] = (4, 4)) -> str:
     buf = io.BytesIO()
     Image.new("RGB", size, (200, 30, 30)).save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _jpeg_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, (200, 30, 30)).save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
+
+
+def _gif_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, (30, 200, 30)).save(buf, format="GIF")
+    return buf.getvalue()
 
 
 def test_text_description_is_not_decoded_as_image():
@@ -59,3 +75,54 @@ def test_referer_follows_image_host():
     assert image_helper._referer_for("https://i.pximg.net/img/x.png") == "https://www.pixiv.net/"
     assert image_helper._referer_for("https://pbs.twimg.com/media/x.jpg") == "https://x.com/"
     assert image_helper._referer_for("https://example.com/a.jpg") == ""
+
+
+def test_download_passes_image_bytes_through(monkeypatch):
+    """未超限的 JPEG 原样进 content_item：宿主发出去的就是作者上传的那份。"""
+    raw = _jpeg_bytes()
+
+    async def fake_fetch(url, *, proxy=None, timeout=10.0):
+        return raw
+
+    monkeypatch.setattr(image_helper, "fetch_image_bytes", fake_fetch)
+    item = asyncio.run(
+        image_helper.download_image_as_content_item(ORIGINAL_URL, description="测试")
+    )
+    assert item is not None
+    assert item["mime_type"] == "image/jpeg"
+    assert item["metadata"]["passthrough"] is True
+    assert base64.b64decode(item["data"]) == raw
+
+
+def test_download_falls_back_to_preview_url(monkeypatch):
+    raw = _jpeg_bytes()
+    seen: list[str] = []
+
+    async def fake_fetch(url, *, proxy=None, timeout=10.0):
+        seen.append(url)
+        return raw if url == PREVIEW_URL else None
+
+    monkeypatch.setattr(image_helper, "fetch_image_bytes", fake_fetch)
+    item = asyncio.run(
+        image_helper.download_image_as_content_item(
+            ORIGINAL_URL, description="测试", preview_url=PREVIEW_URL
+        )
+    )
+    assert item is not None
+    assert seen == [ORIGINAL_URL, PREVIEW_URL]
+    assert item["metadata"]["source_url"] == PREVIEW_URL
+
+
+def test_download_reencodes_unsupported_container(monkeypatch):
+    raw = _gif_bytes()
+
+    async def fake_fetch(url, *, proxy=None, timeout=10.0):
+        return raw
+
+    monkeypatch.setattr(image_helper, "fetch_image_bytes", fake_fetch)
+    item = asyncio.run(
+        image_helper.download_image_as_content_item(ORIGINAL_URL, description="测试")
+    )
+    assert item is not None
+    assert item["mime_type"] in {"image/jpeg", "image/png"}
+    assert item["metadata"]["passthrough"] is False

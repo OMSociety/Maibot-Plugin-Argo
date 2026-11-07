@@ -55,7 +55,7 @@ ENGINE_MAP: dict[str, KindSpec] = {
 # 关键词正向搜图允许的引擎与用途说明
 IMAGE_SEARCH_ENGINES: dict[str, str] = {
     "metaso_image": "通用配图、表情包梗图与游戏截图（默认）",
-    "pixiv": "Pixiv 公开插画、同人图、漫画与角色立绘",
+    "pixiv": "Pixiv 公开插画、同人图、漫画与角色立绘（可按画师 id 或画师名浏览）",
 }
 
 # 以图搜图（反搜）允许的引擎与用途说明

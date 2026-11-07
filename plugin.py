@@ -173,6 +173,7 @@ class ArgoConfig(PluginConfigBase):
 
 _KIND_HINT = "；".join(f"{kind}={spec.purpose}" for kind, spec in argo_cli.ENGINE_MAP.items())
 _REVERSE_HINT = "；".join(f"{eng}={desc}" for eng, desc in argo_cli.REVERSE_IMAGE_ENGINES.items())
+_IMAGE_HINT = "；".join(f"{eng}={desc}" for eng, desc in argo_cli.IMAGE_SEARCH_ENGINES.items())
 
 
 class ArgoPlugin(MaiBotPlugin):
@@ -515,7 +516,8 @@ class ArgoPlugin(MaiBotPlugin):
             "想找某个人物/番剧的图片、搜表情包梗图、看某款游戏或物品长什么样时调用。\n"
             "插件会自动下载前几张可用图片并作为工具图片结果（content_items）放入你的视觉上下文："
             "你不仅能亲眼看到搜出来的图对不对，还能在 reply 工具里用 attach_pic="
-            '"tool_result:<call_id>:1" 把看中的图直接发给群友！'
+            '"tool_result:<call_id>:1" 把看中的图直接发给群友！\n'
+            f"引擎选路：{_IMAGE_HINT}。按角色名或作品名找 Pixiv 插画时选 pixiv。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -523,6 +525,14 @@ class ArgoPlugin(MaiBotPlugin):
                 param_type=ToolParamType.STRING,
                 description="搜图关键词，例如『孤独摇滚 后藤一里 表情包』『黑神话悟空 截图』",
                 required=True,
+            ),
+            ToolParameterInfo(
+                name="engine",
+                param_type=ToolParamType.STRING,
+                description="搜图引擎：metaso_image 搜通用图，pixiv 搜公开插画与漫画",
+                enum_values=list(argo_cli.IMAGE_SEARCH_ENGINES.keys()),
+                default="metaso_image",
+                required=False,
             ),
             ToolParameterInfo(
                 name="max_results",
@@ -542,6 +552,12 @@ class ArgoPlugin(MaiBotPlugin):
         if not query:
             return fail("缺少 query：要搜什么图片？")
 
+        engine = str(kwargs.get("engine") or "metaso_image").strip().lower()
+        if engine not in argo_cli.IMAGE_SEARCH_ENGINES:
+            return fail(
+                f"不支持的搜图引擎：{engine}（可选：{' / '.join(argo_cli.IMAGE_SEARCH_ENGINES)}）"
+            )
+
         try:
             limit = int(kwargs.get("max_results") or 2)
         except (TypeError, ValueError):
@@ -556,7 +572,7 @@ class ArgoPlugin(MaiBotPlugin):
             "argo_search",
             {
                 "query": query,
-                "engine": "metaso_image",
+                "engine": engine,
                 "max_results": max(6, limit * 3),
                 "include_local": False,
                 "summary": False,

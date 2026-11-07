@@ -33,6 +33,45 @@ class TestToolDescription:
         for eng, desc in plugin.argo_cli.REVERSE_IMAGE_ENGINES.items():
             assert f"{eng}={desc}" in plugin._REVERSE_HINT
 
+    def test_image_hint_is_generated_from_image_search_engines(self):
+        for eng, desc in plugin.argo_cli.IMAGE_SEARCH_ENGINES.items():
+            assert f"{eng}={desc}" in plugin._IMAGE_HINT
+
+
+class TestImageSearchEngine:
+    class _FakeWorker:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, arguments, timeout=0.0):
+            self.calls.append((name, arguments))
+            return {"count": 0, "results": []}
+
+    def _instance(self):
+        instance = plugin.ArgoPlugin()
+        instance._plugin_config_instance = type(instance).get_config_model()()
+        fake = self._FakeWorker()
+        instance._get_worker = lambda: fake
+        return instance, fake
+
+    def test_pixiv_engine_is_forwarded(self):
+        instance, fake = self._instance()
+        out = asyncio.run(instance.handle_image_search(query="初音ミク", engine="pixiv"))
+        assert out["success"] is False
+        assert fake.calls[0][1]["engine"] == "pixiv"
+
+    def test_default_engine_remains_metaso_image(self):
+        instance, fake = self._instance()
+        asyncio.run(instance.handle_image_search(query="风景"))
+        assert fake.calls[0][1]["engine"] == "metaso_image"
+
+    def test_unknown_engine_is_rejected_before_worker_call(self):
+        instance, fake = self._instance()
+        out = asyncio.run(instance.handle_image_search(query="初音ミク", engine="saucenao"))
+        assert out["success"] is False
+        assert "不支持的搜图引擎" in out["error"]
+        assert fake.calls == []
+
 
 class TestCache:
     def _plugin(self) -> plugin.ArgoPlugin:

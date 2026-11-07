@@ -54,7 +54,8 @@
 
 ### 2. `argo_image_search`：按关键词搜动漫图、表情包梗图与游戏截图
 
-- 底层调用 `metaso_image` 检索图片，并自动下载前 `max_results`（1–4，默认 2）张可用图片经 Pillow 校验归一化后写入 `content_items`。
+- `engine` 可选 `metaso_image`（通用配图、梗图与游戏截图，默认）或 `pixiv`（Pixiv 公开插画、同人图、漫画与角色立绘）。
+- 插件自动下载前 `max_results`（1–4，默认 2）张可用图片，经 Pillow 校验归一化后写入 `content_items`；Pixiv 预览图保持作品宽高比，作品页作为出处链接。
 - 麦麦可在视觉上下文中直接查看搜到的图片，并在调用 `reply` 时通过 `attach_pic="tool_result:<call_id>:1"` 将选中的图片发到群聊。
 
 ### 3. `argo_reverse_image`：以图搜图与动漫角色识别

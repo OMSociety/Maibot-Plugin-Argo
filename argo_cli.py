@@ -52,6 +52,12 @@ ENGINE_MAP: dict[str, KindSpec] = {
     "web_en": KindSpec("tavily", True, "英文网页、海外游戏资讯与外网冲浪"),
 }
 
+# 关键词正向搜图允许的引擎与用途说明
+IMAGE_SEARCH_ENGINES: dict[str, str] = {
+    "metaso_image": "通用配图、表情包梗图与游戏截图（默认）",
+    "pixiv": "Pixiv 公开插画、同人图、漫画与角色立绘",
+}
+
 # 以图搜图（反搜）允许的引擎与用途说明
 REVERSE_IMAGE_ENGINES: dict[str, str] = {
     "saucenao": "二次元插画、动漫图、立绘、同人图找 Pixiv/Twitter 原图出处与画师（首选）",

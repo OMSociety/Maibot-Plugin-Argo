@@ -628,7 +628,17 @@ class ArgoPlugin(MaiBotPlugin):
             if c_item is not None:
                 content_items.append(c_item)
                 budget -= len(c_item["data"]) + 4096
-                lines.append(f"{idx}. {title}\n   图片直链：{img_url}")
+                credits = []
+                author = str(item.get("author") or "").strip()
+                if author:
+                    credits.append(f"作者：{author}")
+                tags = item.get("tags")
+                if isinstance(tags, list):
+                    names = [str(t).strip() for t in tags[:3] if str(t).strip()]
+                    if names:
+                        credits.append("标签：" + " / ".join(names))
+                suffix = f"（{'；'.join(credits)}）" if credits else ""
+                lines.append(f"{idx}. {title}{suffix}\n   图片直链：{img_url}")
 
         if not content_items:
             text_fallback = argo_cli.format_results(payload, max_items=limit, max_chars=1200)
@@ -665,7 +675,9 @@ class ArgoPlugin(MaiBotPlugin):
             "1. 搜聊天里的图（最常用）：传目标图片所在消息的 msg_id"
             "（留空则自动找当前会话最新一张图），三条引擎都吃得下；\n"
             "2. 搜公网图片链接：直接填 image_url。\n"
-            "插件会把匹配结果首条缩略图放入 content_items 供你亲眼核对与用 attach_pic 发出。"
+            "插件会把匹配结果首条缩略图放入 content_items 供你亲眼核对与用 attach_pic 发出。\n"
+            "相似度不足 90% 的匹配只是相似作品线索，不得断言为同一张图、更不得据此指认作者；"
+            "结果里的数字是作品编号，不是画师编号。"
         ),
         parameters=[
             ToolParameterInfo(

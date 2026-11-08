@@ -116,6 +116,28 @@ class TestFormatResults:
         assert "https://example.org/a" in text
         assert "共 1 条" in text
 
+    def test_low_similarity_is_marked_not_assertable(self):
+        payload = {
+            "results": [
+                {
+                    "title": "红魔馆",
+                    "source": "saucenao",
+                    "similarity": 84.85,
+                    "snippet": "相似度 84.85% · 作者 HAK",
+                },
+                {
+                    "title": "同作者原图",
+                    "source": "saucenao",
+                    "similarity": 96.0,
+                    "snippet": "相似度 96% · 作者 ke-ta",
+                },
+            ]
+        }
+        text = argo_cli.format_results(payload)
+        assert text.count("不得断言为同一作品") == 1
+        assert "相似度 84.85% · 作者 HAK（相似度不足 90%，不得断言为同一作品）" in text
+        assert "不得断言为同一作品" not in text.split("2. 同作者原图")[1]
+
     def test_note_is_appended(self):
         text = argo_cli.format_results({"results": [{"title": "t"}]}, note="已降级")
         assert "已降级" in text

@@ -264,6 +264,10 @@ def format_results(
         snippet = _pick(item, "snippet", "summary", "description", "content", "text")
         if len(snippet) > 140:
             snippet = snippet[:140].rstrip() + "…"
+        similarity = item.get("similarity")
+        if isinstance(similarity, (int, float)) and 0 < float(similarity) < 90:
+            mark = "（相似度不足 90%，不得断言为同一作品）"
+            snippet = (snippet + mark) if snippet else mark
         head = f"{index}. {title}"
         if source or date:
             head += f"\n   来源：{source}" + (f" · {date[:10]}" if date else "")

@@ -513,10 +513,11 @@ class ArgoPlugin(MaiBotPlugin):
         "argo_image_search",
         brief_description="按关键词搜索动漫图、角色图、表情包梗图或游戏截图，并把图片带回给麦麦查看和发送",
         detailed_description=(
-            "想找某个人物/番剧的图片、搜表情包梗图、看某款游戏或物品长什么样时调用。\n"
-            "插件会自动下载前几张可用图片并作为工具图片结果（content_items）放入你的视觉上下文："
-            "你不仅能亲眼看到搜出来的图对不对，还能在 reply 工具里用 attach_pic="
-            '"tool_result:<call_id>:1" 把看中的图直接发给群友！\n'
+            "想找某个人物/番剧的图片、搜表情包梗图、看某款游戏或物品长什么样时调用；"
+            "回答到具体角色、作品、画风或物品长什么样时，也可以主动搜图自然配上 1–2 张，"
+            "不必等群友开口。\n"
+            "本工具带回的是轻量候选图（content_items）：先亲眼看过，挑中满意的再调 "
+            "argo_send_image 按原分辨率带回并发送。\n"
             f"引擎选路：{_IMAGE_HINT}。按角色名或作品名找 Pixiv 插画时选 pixiv——query 是标签串，"
             "空格分隔多个标签，按标签匹配"
             "（如「東方Project10000users入り フランドール 白タイツ」）；"
@@ -527,7 +528,8 @@ class ArgoPlugin(MaiBotPlugin):
             "user:<画师 id> 或画师主页链接，"
             "可再接标签收窄（如「画师:ke-ta フランドール」）。\n"
             "reply 返回 success:false（图片没发出去）时，换一张没发过的结果图重发；"
-            "没有可换的就只补文字，不解释、不道歉、不说明发送过程。"
+            "没有可换的就只补文字，不解释、不道歉、不说明发送过程。\n"
+            "发图无需预告或复述：图发出去就行，不说「图发你了」「已发送」。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -554,9 +556,11 @@ class ArgoPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="max_results",
                 param_type=ToolParamType.INTEGER,
-                description="最多带回几张图片供查看（1–4，默认 2）",
+                description=(
+                    "最多带回几张候选图供查看（1–8，默认 6）；挑中后用 argo_send_image 原图发出"
+                ),
                 required=False,
-                default=2,
+                default=6,
             ),
         ],
         visibility="visible",
@@ -576,10 +580,10 @@ class ArgoPlugin(MaiBotPlugin):
             )
 
         try:
-            limit = int(kwargs.get("max_results") or 2)
+            limit = int(kwargs.get("max_results") or 6)
         except (TypeError, ValueError):
-            limit = 2
-        limit = max(1, min(4, limit))
+            limit = 6
+        limit = max(1, min(8, limit))
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
@@ -590,7 +594,7 @@ class ArgoPlugin(MaiBotPlugin):
             {
                 "query": query,
                 "engine": engine,
-                "max_results": max(6, limit * 3),
+                "max_results": max(10, limit * 2),
                 "include_local": False,
                 "summary": False,
             },
@@ -623,7 +627,9 @@ class ArgoPlugin(MaiBotPlugin):
                 preview_url=str(item.get("image_url_preview") or "").strip() or None,
                 name_prefix=f"imgsearch_{idx}",
                 proxy=proxy,
-                max_base64_bytes=max(budget - 4096, 0),
+                max_base64_bytes=min(image_helper.CANDIDATE_BASE64_BUDGET, max(budget - 4096, 0)),
+                max_edge=image_helper.CANDIDATE_MAX_EDGE,
+                quality=image_helper.CANDIDATE_QUALITY,
             )
             if c_item is not None:
                 content_items.append(c_item)
@@ -818,7 +824,66 @@ class ArgoPlugin(MaiBotPlugin):
             out["content_items"] = content_items
         return out
 
-    # ── 工具 4：玩家社区与社媒舆情检索 ──────────────────────────────
+    # ── 工具 4：发送所选图片（按原分辨率带回） ─────────────────────
+
+    @Tool(
+        "argo_send_image",
+        brief_description="把搜索结果里选中的图片按原分辨率带回，供 reply 发送给群友",
+        detailed_description=(
+            "只在搜图/反搜结果里看过候选、确认画面后再调用；image_url 填结果条目里的图片直链。\n"
+            "图片会进入本工具结果（content_items），随后在 reply 工具里用 attach_pic="
+            '"tool_result:<call_id>:1" 发给群友；直接发，不要预告，不要复述发送过程。\n'
+            "reply 返回 success:false（图片没发出去）时，换一张结果图重发；"
+            "没有可换的就只补文字，不解释、不道歉、不说明发送过程。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="image_url",
+                param_type=ToolParamType.STRING,
+                description="图片直链，必填；填搜图/反搜结果条目里的图片直链",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="preview_url",
+                param_type=ToolParamType.STRING,
+                description="预览直链（可选）；image_url 取不到时改用它",
+                required=False,
+                default="",
+            ),
+        ],
+    )
+    async def handle_send_image(
+        self, image_url: str, preview_url: str = "", **kwargs
+    ) -> dict[str, Any]:
+        image_url = (image_url or "").strip()
+        if not self.config.plugin.enabled:
+            return fail("插件未启用")
+        if not image_helper.is_public_http_url(image_url):
+            return fail("image_url 需要是公网图片直链")
+        preview = (preview_url or "").strip() or None
+        if preview and not image_helper.is_public_http_url(preview):
+            preview = None
+        c_item = await image_helper.download_image_as_content_item(
+            image_url,
+            description="待发送图片",
+            preview_url=preview,
+            name_prefix="send_img",
+            proxy=self.config.argo.proxy,
+            max_base64_bytes=image_helper.MAX_FRAME_BUDGET - 4096,
+        )
+        if not c_item:
+            return fail("图片下载失败：该直链暂时取不到，可换一张候选图重试")
+        return {
+            "success": True,
+            "content": (
+                "已把这张图片按原分辨率放入本工具结果（content_items）。"
+                '发送：reply 工具 attach_pic="tool_result:<call_id>:1"。'
+                "不要预告、不要复述发送过程。"
+            ),
+            "content_items": [c_item],
+        }
+
+    # ── 工具 5：玩家社区与社媒舆情检索 ──────────────────────────────
 
     @Tool(
         "argo_social_search",
@@ -906,7 +971,7 @@ class ArgoPlugin(MaiBotPlugin):
         )
         return {"success": True, "content": text}
 
-    # ── 工具 5：打开网页/公众号/单条推文读正文 ──────────────────────
+    # ── 工具 6：打开网页/公众号/单条推文读正文 ──────────────────────
 
     @Tool(
         "argo_fetch",
@@ -1021,7 +1086,7 @@ class ArgoPlugin(MaiBotPlugin):
             content = content[:max_chars].rstrip() + "…"
         return {"success": True, "content": f"【{title}】\n{content}\n来源：{url}"}
 
-    # ── 工具 6：后台长任务（跑完主动携带摘要唤醒麦麦） ──────────────
+    # ── 工具 7：后台长任务（跑完主动携带摘要唤醒麦麦） ──────────────
 
     @Tool(
         "argo_job",

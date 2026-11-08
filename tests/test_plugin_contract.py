@@ -73,6 +73,41 @@ class TestImageSearchEngine:
         assert fake.calls == []
 
 
+class TestSendImage:
+    def _instance(self):
+        instance = plugin.ArgoPlugin()
+        instance._plugin_config_instance = type(instance).get_config_model()()
+        return instance
+
+    def test_non_public_url_is_rejected(self):
+        instance = self._instance()
+        out = asyncio.run(instance.handle_send_image(image_url="http://127.0.0.1/a.jpg"))
+        assert out["success"] is False
+        assert "公网" in out["error"]
+
+    def test_selected_image_comes_back_as_content_item(self, monkeypatch):
+        instance = self._instance()
+        calls = {}
+
+        async def fake_download(image_url, **kwargs):
+            calls["image_url"] = image_url
+            calls["kwargs"] = kwargs
+            return {"content_type": "image", "mime_type": "image/jpeg", "data": "AAAA"}
+
+        monkeypatch.setattr(plugin.image_helper, "download_image_as_content_item", fake_download)
+        out = asyncio.run(
+            instance.handle_send_image(
+                image_url="https://i.pximg.net/img-original/a.jpg",
+                preview_url="https://i.pximg.net/c/600x1200/a.jpg",
+            )
+        )
+        assert out["success"] is True
+        assert len(out["content_items"]) == 1
+        assert "attach_pic" in out["content"]
+        assert calls["image_url"] == "https://i.pximg.net/img-original/a.jpg"
+        assert calls["kwargs"]["preview_url"] == "https://i.pximg.net/c/600x1200/a.jpg"
+
+
 class TestCache:
     def _plugin(self) -> plugin.ArgoPlugin:
         return plugin.ArgoPlugin()

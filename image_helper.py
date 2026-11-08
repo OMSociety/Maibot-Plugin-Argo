@@ -33,6 +33,11 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 # 留出 1MB 给信封、文案与其他字段。
 MAX_FRAME_BUDGET = 15 * 1024 * 1024
 MAX_VISUAL_EDGE = 1600
+# 搜图候选（给模型过目挑选用）：轻量即可，压低上下文与分帧占用；
+# 选中后的发送走原生分辨率，两档互不影响。
+CANDIDATE_MAX_EDGE = 1024
+CANDIDATE_QUALITY = 90
+CANDIDATE_BASE64_BUDGET = 2 * 1024 * 1024
 # 结果图统一重编码一次：分辨率不变，只换一份本地生成的字节。
 JPEG_QUALITY = 95
 DEFAULT_USER_AGENT = (
@@ -408,9 +413,14 @@ def build_content_item(
     description: str,
     name_prefix: str,
     source_url: str,
+    max_edge: int | None = None,
+    quality: int = JPEG_QUALITY,
 ) -> dict[str, Any] | None:
-    """把图片字节重编码后封装成 content_item：分辨率不变，字节由本地生成。"""
-    normalized = normalize_image_bytes(raw_bytes)
+    """把图片字节重编码后封装成 content_item：字节由本地生成。
+
+    ``max_edge`` 为 None 时保持原分辨率（发送档）；传 1024 等值即候选档。
+    """
+    normalized = normalize_image_bytes(raw_bytes, max_edge=max_edge, quality=quality)
     if normalized is None:
         return None
     fmt, b64, meta = normalized
@@ -463,10 +473,13 @@ async def download_image_as_content_item(
     proxy: str | None = None,
     timeout: float = 10.0,
     max_base64_bytes: int = MAX_FRAME_BUDGET,
+    max_edge: int | None = None,
+    quality: int = JPEG_QUALITY,
 ) -> dict[str, Any] | None:
     """下载单张公网图片并封装为 Maisaka 可直接查看的 content_item 字典。
 
-    图片统一按原分辨率重编码一次，宿主拿到的是本地生成的字节；
+    默认按原分辨率重编码一次（发送档），宿主拿到的是本地生成的字节；
+    传 ``max_edge``/``quality`` 则进入候选档（给模型过目挑选的轻量图）。
     原图取不到时改用 ``preview_url``（引擎给的预览直链）；
     两者都超出 ``max_base64_bytes`` 时才逐档缩小重编码，保证有图可发。
     """
@@ -485,6 +498,8 @@ async def download_image_as_content_item(
             description=description,
             name_prefix=name_prefix,
             source_url=candidate,
+            max_edge=max_edge,
+            quality=quality,
         )
         if item is None:
             continue

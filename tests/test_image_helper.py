@@ -99,6 +99,29 @@ def test_download_reencodes_without_resizing(monkeypatch):
         assert decoded.size == (8, 8)
 
 
+def test_download_candidate_profile_caps_edge(monkeypatch):
+    """候选档把长边压到 1024、质量 90，发送档仍按原分辨率。"""
+    raw = _jpeg_bytes((2400, 2400))
+
+    async def fake_fetch(url, *, proxy=None, timeout=10.0):
+        return raw
+
+    monkeypatch.setattr(image_helper, "fetch_image_bytes", fake_fetch)
+    item = asyncio.run(
+        image_helper.download_image_as_content_item(
+            ORIGINAL_URL,
+            description="测试",
+            max_edge=image_helper.CANDIDATE_MAX_EDGE,
+            quality=image_helper.CANDIDATE_QUALITY,
+            max_base64_bytes=image_helper.CANDIDATE_BASE64_BUDGET,
+        )
+    )
+    assert item is not None
+    assert item["metadata"]["reencoded"] is True
+    assert item["metadata"]["output_width"] <= 1024
+    assert len(item["data"]) <= image_helper.CANDIDATE_BASE64_BUDGET
+
+
 def test_download_falls_back_to_preview_url(monkeypatch):
     raw = _jpeg_bytes()
     seen: list[str] = []

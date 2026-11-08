@@ -29,6 +29,9 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
+# 宿主插件进程按 16MB 分帧收发（4 字节长度前缀 + JSON），工具结果里的图片全走这一帧；
+# 留出 1MB 给信封、文案与其他字段。
+MAX_FRAME_BUDGET = 15 * 1024 * 1024
 MAX_VISUAL_EDGE = 1600
 # 宿主对工具返回图不做二次压缩，这三种格式原样透传，保留作者上传的分辨率与编码。
 _PASSTHROUGH_FORMATS = {"jpeg": "jpeg", "png": "png", "webp": "webp"}
@@ -413,36 +416,15 @@ async def fetch_image_bytes(
         return None
 
 
-async def download_image_as_content_item(
-    image_url: str,
+def build_content_item(
+    raw_bytes: bytes,
     *,
     description: str,
-    preview_url: str | None = None,
-    name_prefix: str = "argo_img",
-    proxy: str | None = None,
-    timeout: float = 10.0,
+    name_prefix: str,
+    source_url: str,
 ) -> dict[str, Any] | None:
-    """下载单张公网图片并封装为 Maisaka 可直接查看的 content_item 字典。
-
-    JPEG/PNG/WebP 且未超体积上限时原样透传，宿主发出去的就是作者上传的那份；
-    原图超限或取不到时改用 ``preview_url``（引擎给的预览直链），
-    仍不可用才重编码压缩，保证有图可发。
-    """
-    candidates = [image_url]
-    if preview_url and preview_url != image_url:
-        candidates.append(preview_url)
-
-    raw_bytes: bytes | None = None
-    used_url = image_url
-    for candidate in candidates:
-        raw_bytes = await fetch_image_bytes(candidate, proxy=proxy, timeout=timeout)
-        if raw_bytes is not None:
-            used_url = candidate
-            break
-    if raw_bytes is None:
-        return None
-
-    probed = await asyncio.to_thread(probe_image_bytes, raw_bytes)
+    """把图片字节封装成 content_item：支持的格式原样透传，其余转码。"""
+    probed = probe_image_bytes(raw_bytes)
     if probed is not None:
         fmt, width, height = probed
         b64 = b64encode(raw_bytes).decode("utf-8")
@@ -454,19 +436,97 @@ async def download_image_as_content_item(
             "passthrough": True,
         }
     else:
-        normalized = await asyncio.to_thread(normalize_image_bytes, raw_bytes)
+        normalized = normalize_image_bytes(raw_bytes)
         if normalized is None:
             return None
         fmt, b64, meta = normalized
         meta = meta | {"passthrough": False}
 
     digest = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:10]
-    item_name = f"{name_prefix}_{digest}.{fmt}"
     return {
         "content_type": "image",
         "data": b64,
         "mime_type": f"image/{fmt}",
-        "name": item_name,
+        "name": f"{name_prefix}_{digest}.{fmt}",
         "description": description,
-        "metadata": meta | {"source_url": used_url},
+        "metadata": meta | {"source_url": source_url},
     }
+
+
+def shrink_to_budget(
+    raw_bytes: bytes,
+    *,
+    description: str,
+    name_prefix: str,
+    source_url: str,
+    max_base64_bytes: int,
+) -> dict[str, Any] | None:
+    """逐档缩小重编码，直到 Base64 长度落进分帧预算。"""
+    for max_edge in (MAX_VISUAL_EDGE, 1200, 900, 640):
+        normalized = normalize_image_bytes(raw_bytes, max_edge=max_edge)
+        if normalized is None:
+            return None
+        fmt, b64, meta = normalized
+        if len(b64) <= max_base64_bytes:
+            digest = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:10]
+            return {
+                "content_type": "image",
+                "data": b64,
+                "mime_type": f"image/{fmt}",
+                "name": f"{name_prefix}_{digest}.{fmt}",
+                "description": description,
+                "metadata": meta | {"passthrough": False, "source_url": source_url},
+            }
+    return None
+
+
+async def download_image_as_content_item(
+    image_url: str,
+    *,
+    description: str,
+    preview_url: str | None = None,
+    name_prefix: str = "argo_img",
+    proxy: str | None = None,
+    timeout: float = 10.0,
+    max_base64_bytes: int = MAX_FRAME_BUDGET,
+) -> dict[str, Any] | None:
+    """下载单张公网图片并封装为 Maisaka 可直接查看的 content_item 字典。
+
+    JPEG/PNG/WebP 且未超体积上限时原样透传，宿主发出去的就是作者上传的那份；
+    原图超限或取不到时改用 ``preview_url``（引擎给的预览直链）；
+    两者都超出 ``max_base64_bytes`` 时才逐档缩小重编码，保证有图可发。
+    """
+    candidates = [image_url]
+    if preview_url and preview_url != image_url:
+        candidates.append(preview_url)
+
+    oversized: tuple[bytes, str] | None = None
+    for candidate in candidates:
+        raw_bytes = await fetch_image_bytes(candidate, proxy=proxy, timeout=timeout)
+        if raw_bytes is None:
+            continue
+        item = await asyncio.to_thread(
+            build_content_item,
+            raw_bytes,
+            description=description,
+            name_prefix=name_prefix,
+            source_url=candidate,
+        )
+        if item is None:
+            continue
+        if len(item["data"]) <= max_base64_bytes:
+            return item
+        if oversized is None:
+            oversized = (raw_bytes, candidate)
+
+    if oversized is None:
+        return None
+    raw_bytes, used_url = oversized
+    return await asyncio.to_thread(
+        shrink_to_budget,
+        raw_bytes,
+        description=description,
+        name_prefix=name_prefix,
+        source_url=used_url,
+        max_base64_bytes=max_base64_bytes,
+    )

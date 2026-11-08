@@ -21,3 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 搜图与反搜的结果图不再缩放重编码：JPEG/PNG/WebP 在原图体积内原样进入 `content_items`，麦麦查看与发到群里的都是作者上传的那份。
 - 单张下载上限从 10MB 提升到 16MB，与宿主 `max_image_size_mb` 对齐；原图超限或取不到时改用引擎给的预览直链。
+
+### Fixed
+
+- 工具结果按宿主 16MB 分帧上限预留余量：单张图片的 Base64 超出剩余预算时逐档缩小重编码，不再因整帧超限报 `E_UNKNOWN`。

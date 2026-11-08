@@ -113,6 +113,34 @@ def test_download_falls_back_to_preview_url(monkeypatch):
     assert item["metadata"]["source_url"] == PREVIEW_URL
 
 
+def test_download_shrinks_when_exceeding_frame_budget(monkeypatch):
+    """超出分帧预算的图逐档缩小重编码，不会让整帧超限报错。"""
+    import random
+
+    noise = Image.new("RGB", (2400, 2400))
+    rng = random.Random(7)
+    noise.putdata(
+        [(rng.randrange(256), rng.randrange(256), rng.randrange(256)) for _ in range(2400 * 2400)]
+    )
+    buf = io.BytesIO()
+    noise.save(buf, format="JPEG", quality=95)
+    raw = buf.getvalue()
+    assert len(raw) * 4 // 3 > 1_000_000
+
+    async def fake_fetch(url, *, proxy=None, timeout=10.0):
+        return raw
+
+    monkeypatch.setattr(image_helper, "fetch_image_bytes", fake_fetch)
+    item = asyncio.run(
+        image_helper.download_image_as_content_item(
+            ORIGINAL_URL, description="测试", max_base64_bytes=1_000_000
+        )
+    )
+    assert item is not None
+    assert len(item["data"]) <= 1_000_000
+    assert item["metadata"]["passthrough"] is False
+
+
 def test_download_reencodes_unsupported_container(monkeypatch):
     raw = _gif_bytes()
 

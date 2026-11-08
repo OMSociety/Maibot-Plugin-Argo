@@ -604,9 +604,10 @@ class ArgoPlugin(MaiBotPlugin):
         content_items: list[dict[str, Any]] = []
         lines: list[str] = []
         proxy = self.config.argo.proxy
+        budget = image_helper.MAX_FRAME_BUDGET
 
         for item in raw_results:
-            if len(content_items) >= limit:
+            if len(content_items) >= limit or budget <= 0:
                 break
             img_url = str(item.get("image_url") or item.get("url") or "").strip()
             if not img_url:
@@ -620,9 +621,11 @@ class ArgoPlugin(MaiBotPlugin):
                 preview_url=str(item.get("image_url_preview") or "").strip() or None,
                 name_prefix=f"imgsearch_{idx}",
                 proxy=proxy,
+                max_base64_bytes=max(budget - 4096, 0),
             )
             if c_item is not None:
                 content_items.append(c_item)
+                budget -= len(c_item["data"]) + 4096
                 lines.append(f"{idx}. {title}\n   图片直链：{img_url}")
 
         if not content_items:

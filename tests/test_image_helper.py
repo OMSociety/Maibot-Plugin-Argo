@@ -77,9 +77,9 @@ def test_referer_follows_image_host():
     assert image_helper._referer_for("https://example.com/a.jpg") == ""
 
 
-def test_download_passes_image_bytes_through(monkeypatch):
-    """未超限的 JPEG 原样进 content_item：宿主发出去的就是作者上传的那份。"""
-    raw = _jpeg_bytes()
+def test_download_reencodes_without_resizing(monkeypatch):
+    """结果图统一重编码一次：分辨率不变，交给宿主的不是原图字节。"""
+    raw = _jpeg_bytes((8, 8))
 
     async def fake_fetch(url, *, proxy=None, timeout=10.0):
         return raw
@@ -90,8 +90,13 @@ def test_download_passes_image_bytes_through(monkeypatch):
     )
     assert item is not None
     assert item["mime_type"] == "image/jpeg"
-    assert item["metadata"]["passthrough"] is True
-    assert base64.b64decode(item["data"]) == raw
+    assert item["metadata"]["reencoded"] is True
+    assert item["metadata"]["output_width"] == 8
+    assert item["metadata"]["output_height"] == 8
+    encoded = base64.b64decode(item["data"])
+    assert encoded != raw
+    with Image.open(io.BytesIO(encoded)) as decoded:
+        assert decoded.size == (8, 8)
 
 
 def test_download_falls_back_to_preview_url(monkeypatch):
@@ -138,7 +143,7 @@ def test_download_shrinks_when_exceeding_frame_budget(monkeypatch):
     )
     assert item is not None
     assert len(item["data"]) <= 1_000_000
-    assert item["metadata"]["passthrough"] is False
+    assert item["metadata"]["reencoded"] is True
 
 
 def test_download_reencodes_unsupported_container(monkeypatch):
@@ -153,4 +158,4 @@ def test_download_reencodes_unsupported_container(monkeypatch):
     )
     assert item is not None
     assert item["mime_type"] in {"image/jpeg", "image/png"}
-    assert item["metadata"]["passthrough"] is False
+    assert item["metadata"]["reencoded"] is True

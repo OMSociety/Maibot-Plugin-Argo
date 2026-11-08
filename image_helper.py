@@ -33,8 +33,8 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 # 留出 1MB 给信封、文案与其他字段。
 MAX_FRAME_BUDGET = 15 * 1024 * 1024
 MAX_VISUAL_EDGE = 1600
-# 宿主对工具返回图不做二次压缩，这三种格式原样透传，保留作者上传的分辨率与编码。
-_PASSTHROUGH_FORMATS = {"jpeg": "jpeg", "png": "png", "webp": "webp"}
+# 结果图统一重编码一次：分辨率不变，只换一份本地生成的字节。
+JPEG_QUALITY = 95
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -194,32 +194,18 @@ def extract_message_images(message: dict[str, Any]) -> list[tuple[str, bytes]]:
     return images
 
 
-def probe_image_bytes(image_bytes: bytes) -> tuple[str, int, int] | None:
-    """只校验并读出尺寸与格式，不重编码；返回 (格式, 宽, 高)。
-
-    仅 JPEG/PNG/WebP 可以原样透传：其余格式（GIF 动画、AVIF 等）交给重编码路径，
-    由 Pillow 落成单帧，避免把宿主不认识的容器直接塞进视觉上下文。
-    """
-    try:
-        with Image.open(BytesIO(image_bytes)) as probe:
-            probe.verify()
-        with Image.open(BytesIO(image_bytes)) as raw:
-            fmt = _PASSTHROUGH_FORMATS.get((raw.format or "").lower())
-            width, height = raw.size
-    except Exception:
-        return None
-    if fmt is None:
-        return None
-    return fmt, width, height
-
-
 def normalize_image_bytes(
     image_bytes: bytes,
     *,
-    max_edge: int = MAX_VISUAL_EDGE,
+    max_edge: int | None = None,
+    quality: int = JPEG_QUALITY,
     prefer_format: str = "jpeg",
 ) -> tuple[str, str, dict[str, int]] | None:
-    """用 Pillow 校验图片并转为紧凑的 Base64 与尺寸信息。"""
+    """用 Pillow 校验图片、按需缩放后重新编码为 Base64 与尺寸信息。
+
+    默认不缩放（``max_edge=None``），只重新编码：宿主要发出去的字节由本地生成，
+    不会与公网上流传的同一份字节完全一致。
+    """
     try:
         with Image.open(BytesIO(image_bytes)) as probe:
             probe.verify()
@@ -229,7 +215,7 @@ def normalize_image_bytes(
                 raw.mode == "P" and "transparency" in raw.info
             )
             work = raw.convert("RGBA" if has_alpha else "RGB")
-            if max(work.size) > max_edge:
+            if max_edge is not None and max(work.size) > max_edge:
                 work.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
             out_w, out_h = work.size
             buf = BytesIO()
@@ -237,7 +223,7 @@ def normalize_image_bytes(
                 work.save(buf, format="PNG")
                 fmt = "png"
             else:
-                work.convert("RGB").save(buf, format="JPEG", quality=88)
+                work.convert("RGB").save(buf, format="JPEG", quality=quality)
                 fmt = "jpeg"
             b64 = b64encode(buf.getvalue()).decode("utf-8")
             return (
@@ -423,24 +409,12 @@ def build_content_item(
     name_prefix: str,
     source_url: str,
 ) -> dict[str, Any] | None:
-    """把图片字节封装成 content_item：支持的格式原样透传，其余转码。"""
-    probed = probe_image_bytes(raw_bytes)
-    if probed is not None:
-        fmt, width, height = probed
-        b64 = b64encode(raw_bytes).decode("utf-8")
-        meta: dict[str, Any] = {
-            "original_width": width,
-            "original_height": height,
-            "output_width": width,
-            "output_height": height,
-            "passthrough": True,
-        }
-    else:
-        normalized = normalize_image_bytes(raw_bytes)
-        if normalized is None:
-            return None
-        fmt, b64, meta = normalized
-        meta = meta | {"passthrough": False}
+    """把图片字节重编码后封装成 content_item：分辨率不变，字节由本地生成。"""
+    normalized = normalize_image_bytes(raw_bytes)
+    if normalized is None:
+        return None
+    fmt, b64, meta = normalized
+    meta = meta | {"reencoded": True}
 
     digest = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:10]
     return {
@@ -475,7 +449,7 @@ def shrink_to_budget(
                 "mime_type": f"image/{fmt}",
                 "name": f"{name_prefix}_{digest}.{fmt}",
                 "description": description,
-                "metadata": meta | {"passthrough": False, "source_url": source_url},
+                "metadata": meta | {"reencoded": True, "source_url": source_url},
             }
     return None
 
@@ -492,8 +466,8 @@ async def download_image_as_content_item(
 ) -> dict[str, Any] | None:
     """下载单张公网图片并封装为 Maisaka 可直接查看的 content_item 字典。
 
-    JPEG/PNG/WebP 且未超体积上限时原样透传，宿主发出去的就是作者上传的那份；
-    原图超限或取不到时改用 ``preview_url``（引擎给的预览直链）；
+    图片统一按原分辨率重编码一次，宿主拿到的是本地生成的字节；
+    原图取不到时改用 ``preview_url``（引擎给的预览直链）；
     两者都超出 ``max_base64_bytes`` 时才逐档缩小重编码，保证有图可发。
     """
     candidates = [image_url]

@@ -525,7 +525,9 @@ class ArgoPlugin(MaiBotPlugin):
             "描述句与表情包、截图这类体裁词用 metaso_image，中文描述即可。"
             "作者名属作者字段：查某位画师的作品时 query 写 画师:<画师名>、"
             "user:<画师 id> 或画师主页链接，"
-            "可再接标签收窄（如「画师:ke-ta フランドール」）。"
+            "可再接标签收窄（如「画师:ke-ta フランドール」）。\n"
+            "reply 返回 success:false（图片没发出去）时，换一张没发过的结果图重发；"
+            "没有可换的就只补文字，不解释、不道歉、不说明发送过程。"
         ),
         parameters=[
             ToolParameterInfo(

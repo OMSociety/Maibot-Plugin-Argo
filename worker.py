@@ -17,15 +17,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from . import argo_cli
+except ImportError:
+    import argo_cli  # type: ignore[no-redef]
+
 logger = logging.getLogger(__name__)
-
-
-def sanitize_no_proxy(val: str) -> str:
-    """移除 NO_PROXY 中会导致 httpx URL 解析报错的 [::1] 项。"""
-    if not val:
-        return ""
-    parts = [p.strip() for p in val.split(",") if p.strip() and p.strip() != "[::1]"]
-    return ",".join(parts)
 
 
 class ArgoWorker:
@@ -87,7 +84,7 @@ class ArgoWorker:
         env["ARGO_IMAGE_LOCAL_ROOTS"] = self.temp_image_root
         for key in ("NO_PROXY", "no_proxy"):
             if key in env:
-                env[key] = sanitize_no_proxy(env[key])
+                env[key] = argo_cli.sanitize_no_proxy(env[key])
         return env
 
     async def start(self) -> None:

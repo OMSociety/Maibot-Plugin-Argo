@@ -1,16 +1,17 @@
 """Argo 检索桥接器 —— 面向麦麦的冲浪、查梗、ACG/游戏百科、社区风评与搜图识图插件。
 
-六个工具：
+七个工具：
 1. ``argo_search``：按语义类别 ``kind``（或显式 ``engine``）查梗、查番剧/游戏/百科、
    看全网实时热榜；
 2. ``argo_image_search``：按关键词搜动漫图、梗图、游戏截图与角色图，把图片经
-   ``content_items`` 回传给麦麦视觉查看并可附上发出；
+   ``content_items`` 回传给麦麦视觉查看；
 3. ``argo_reverse_image``：以图搜图与动漫角色识别（``saucenao`` / ``animetrace`` /
    ``google_lens``），自动从聊天消息取图并回传缩略图供麦麦核验；
 4. ``argo_social_search``：跨 Bilibili、Twitter/X、小红书、Reddit、V2EX、Hacker News、
    YouTube 搜玩家社区讨论与实时风评；
 5. ``argo_fetch``：打开网页、攻略长贴、微信公众号文章或单条推文读取正文；
-6. ``argo_job``：多源长线深扒或整站/长文档异步作业，跑完后自动携带摘要唤醒麦麦。
+6. ``argo_job``：多源长线深扒或整站/长文档异步作业，跑完后自动携带摘要唤醒麦麦；
+7. ``argo_send_image``：把选中的结果图按原分辨率带回并发送给群友。
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ except ImportError:
 
 _CACHE_TTL = 300.0
 _CACHE_MAX = 128
+_WATCH_POLL_SECONDS = 2
 _WEIXIN_HOST = "mp.weixin.qq.com"
 _TWEET_URL_PREFIXES = (
     "https://x.com/",
@@ -52,6 +54,22 @@ _TWEET_URL_PREFIXES = (
 def fail(message: str) -> dict[str, Any]:
     """失败结果。宿主取 ``error`` 当错误信息、``content`` 当可见文本，两个字段都填。"""
     return {"success": False, "error": message, "content": message}
+
+
+def _int_arg(
+    kwargs: dict[str, Any],
+    name: str,
+    default: int,
+    lo: int,
+    hi: int | None,
+) -> int:
+    """取整数参数并夹到 ``[lo, hi]``；缺失、非法或为空时用 ``default``。"""
+    try:
+        value = int(kwargs.get(name) or default)
+    except (TypeError, ValueError):
+        value = default
+    value = max(lo, value)
+    return min(hi, value) if hi is not None else value
 
 
 class PluginSection(PluginConfigBase):
@@ -155,6 +173,11 @@ class JobsSection(PluginConfigBase):
         description="查看状态时回显的日志尾部行数",
         json_schema_extra={"label": "日志行数"},
     )
+    job_watch_seconds: int = Field(
+        default=720,
+        description="提交后台作业后守候完成的秒数，超时即停止轮询",
+        json_schema_extra={"label": "守候时长（秒）"},
+    )
     proactive_notify: bool = Field(
         default=True,
         description="后台长任务完成后是否自动携带结果摘要唤醒麦麦汇报",
@@ -185,8 +208,7 @@ class ArgoPlugin(MaiBotPlugin):
         super().__init__()
         self._cache: dict[tuple[str, str, int, str], tuple[float, str]] = {}
         self._hits: dict[str, deque[float]] = defaultdict(deque)
-        self._jobs_dir: Path | None = None
-        self._temp_img_dir: Path | None = None
+        self._data_dirs: dict[str, Path] = {}
         self._worker: worker.ArgoWorker | None = None
         self._watch_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -199,25 +221,17 @@ class ArgoPlugin(MaiBotPlugin):
             "python": self.config.argo.python or argo_cli.default_python(),
         }
 
-    def _temp_root(self) -> Path:
-        if self._temp_img_dir is None:
+    def _data_dir(self, name: str) -> Path:
+        cached = self._data_dirs.get(name)
+        if cached is None:
             try:
                 base = self.ctx.paths.data_dir
             except Exception:
                 base = Path(__file__).resolve().parent / "data"
-            self._temp_img_dir = base / "temp_images"
-            self._temp_img_dir.mkdir(parents=True, exist_ok=True)
-        return self._temp_img_dir
-
-    def _job_root(self) -> Path:
-        if self._jobs_dir is None:
-            try:
-                base = self.ctx.paths.data_dir
-            except Exception:
-                base = Path(__file__).resolve().parent / "data"
-            self._jobs_dir = base / "jobs"
-            self._jobs_dir.mkdir(parents=True, exist_ok=True)
-        return self._jobs_dir
+            cached = base / name
+            cached.mkdir(parents=True, exist_ok=True)
+            self._data_dirs[name] = cached
+        return cached
 
     def _get_worker(self) -> worker.ArgoWorker:
         if self._worker is None:
@@ -226,7 +240,7 @@ class ArgoPlugin(MaiBotPlugin):
                 python_path=self.config.argo.python or argo_cli.default_python(),
                 argo_dir=self.config.argo.root,
                 argo_env_file=env_file,
-                temp_image_root=self._temp_root(),
+                temp_image_root=self._data_dir("temp_images"),
                 default_timeout=float(self.config.argo.timeout_seconds),
             )
         return self._worker
@@ -268,10 +282,11 @@ class ArgoPlugin(MaiBotPlugin):
 
     async def _watch_job_and_notify(self, job_id: str, stream_id: str) -> None:
         """后台轮询作业目录的 rc 文件；一旦完成则携带输出摘要主动唤醒麦麦。"""
-        job_root = self._job_root()
+        job_root = self._data_dir("jobs")
         try:
-            for _ in range(360):  # 最长守候约 12 分钟
-                await asyncio.sleep(2.0)
+            watch_seconds = max(1, int(self.config.jobs.job_watch_seconds))
+            for _ in range(max(1, watch_seconds // _WATCH_POLL_SECONDS)):
+                await asyncio.sleep(_WATCH_POLL_SECONDS)
                 info = await asyncio.to_thread(
                     argo_cli.job_status,
                     job_root,
@@ -310,8 +325,8 @@ class ArgoPlugin(MaiBotPlugin):
     # ── 生命周期 ────────────────────────────────────────────────────
 
     async def on_load(self) -> None:
-        self._job_root()
-        self._temp_root()
+        self._data_dir("jobs")
+        self._data_dir("temp_images")
         root = argo_cli.argo_root(self.config.argo.root)
         if not argo_cli.launcher(root).exists():
             self.ctx.logger.warning(
@@ -326,7 +341,7 @@ class ArgoPlugin(MaiBotPlugin):
                 argo_cli.DEFAULT_MODE,
             )
         removed = argo_cli.prune_jobs(
-            self._job_root(), retention_days=self.config.jobs.retention_days
+            self._data_dir("jobs"), retention_days=self.config.jobs.retention_days
         )
         try:
             await self._get_worker().start()
@@ -427,11 +442,7 @@ class ArgoPlugin(MaiBotPlugin):
         if explicit_engine == "metaso_image":
             return fail("搜图片请改调专用工具 argo_image_search（支持把图片直接带回给你查看）。")
 
-        try:
-            want = int(kwargs.get("max_results") or self.config.limits.max_results)
-        except (TypeError, ValueError):
-            want = int(self.config.limits.max_results)
-        want = max(1, min(10, want))
+        want = _int_arg(kwargs, "max_results", int(self.config.limits.max_results), 1, 10)
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
@@ -440,7 +451,6 @@ class ArgoPlugin(MaiBotPlugin):
         engine, note = argo_cli.resolve_engine(
             kind,
             self.config.limits.enable_paid,
-            query,
             explicit_engine=explicit_engine,
         )
         mode = argo_cli.normalize_mode(self.config.argo.mode)
@@ -526,22 +536,15 @@ class ArgoPlugin(MaiBotPlugin):
             "描述句与表情包、截图这类体裁词用 metaso_image，中文描述即可。"
             "作者名属作者字段：查某位画师的作品时 query 写 画师:<画师名>、"
             "user:<画师 id> 或画师主页链接，"
-            "可再接标签收窄（如「画师:ke-ta フランドール」）。\n"
-            "reply 返回 success:false（图片没发出去）时，换一张没发过的结果图重发；"
-            "没有可换的就只补文字，不解释、不道歉、不说明发送过程。\n"
-            "发图无需预告或复述：图发出去就行，不说「图发你了」「已发送」。"
+            "可再接标签收窄（如「画师:ke-ta フランドール」）。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
                 description=(
-                    "搜图关键词：pixiv 写标签串，空格分隔多个标签"
-                    "（如「初音ミク 制服」「東方Project10000users入り フランドール 白タイツ」），"
-                    "作品名、角色名、题材、服装与收藏夹标签都可用，日文名与中文名都能命中；"
-                    "metaso_image 写中文描述（如「孤独摇滚 后藤一里 表情包」）。"
-                    "查某位画师写「画师:ke-ta」或「user:3104565」，可再接标签收窄"
-                    "（如「画师:ke-ta フランドール」）"
+                    "搜图关键词。pixiv 写标签串（空格分隔，如「初音ミク 制服」），"
+                    "查画师写「画师:ke-ta」或「user:3104565」；metaso_image 写中文描述。"
                 ),
                 required=True,
             ),
@@ -579,11 +582,7 @@ class ArgoPlugin(MaiBotPlugin):
                 f"不支持的搜图引擎：{engine}（可选：{' / '.join(argo_cli.IMAGE_SEARCH_ENGINES)}）"
             )
 
-        try:
-            limit = int(kwargs.get("max_results") or 6)
-        except (TypeError, ValueError):
-            limit = 6
-        limit = max(1, min(8, limit))
+        limit = _int_arg(kwargs, "max_results", 6, 1, 8)
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
@@ -595,6 +594,7 @@ class ArgoPlugin(MaiBotPlugin):
                 "query": query,
                 "engine": engine,
                 "max_results": max(10, limit * 2),
+                "mode": argo_cli.normalize_mode(self.config.argo.mode),
                 "include_local": False,
                 "summary": False,
             },
@@ -627,13 +627,16 @@ class ArgoPlugin(MaiBotPlugin):
                 preview_url=str(item.get("image_url_preview") or "").strip() or None,
                 name_prefix=f"imgsearch_{idx}",
                 proxy=proxy,
-                max_base64_bytes=min(image_helper.CANDIDATE_BASE64_BUDGET, max(budget - 4096, 0)),
+                max_base64_bytes=min(
+                    image_helper.CANDIDATE_BASE64_BUDGET,
+                    max(budget - image_helper.ENVELOPE_OVERHEAD, 0),
+                ),
                 max_edge=image_helper.CANDIDATE_MAX_EDGE,
                 quality=image_helper.CANDIDATE_QUALITY,
             )
             if c_item is not None:
                 content_items.append(c_item)
-                budget -= len(c_item["data"]) + 4096
+                budget -= len(c_item["data"]) + image_helper.ENVELOPE_OVERHEAD
                 credits = []
                 author = str(item.get("author") or "").strip()
                 if author:
@@ -647,7 +650,9 @@ class ArgoPlugin(MaiBotPlugin):
                 lines.append(f"{idx}. {title}{suffix}\n   图片直链：{img_url}")
 
         if not content_items:
-            text_fallback = argo_cli.format_results(payload, max_items=limit, max_chars=1200)
+            text_fallback = argo_cli.format_results(
+                payload, max_items=limit, max_chars=int(self.config.limits.max_chars)
+            )
             return {
                 "success": True,
                 "content": "搜到了候选图片，但缩略图防盗链未能直接拉取，仅返回链接：\n"
@@ -739,14 +744,8 @@ class ArgoPlugin(MaiBotPlugin):
             )
 
         msg_id = str(kwargs.get("msg_id") or "").strip()
-        try:
-            image_index = max(0, int(kwargs.get("image_index") or 0))
-        except (TypeError, ValueError):
-            image_index = 0
-        try:
-            want = max(1, min(8, int(kwargs.get("max_results") or 5)))
-        except (TypeError, ValueError):
-            want = 5
+        image_index = _int_arg(kwargs, "image_index", 0, 0, None)
+        want = _int_arg(kwargs, "max_results", 5, 1, 8)
 
         raw_url = str(kwargs.get("image_url") or "").strip()
         stream_id = str(kwargs.get("stream_id") or "")
@@ -765,7 +764,7 @@ class ArgoPlugin(MaiBotPlugin):
                 stream_id=stream_id,
                 msg_id=msg_id,
                 image_index=image_index,
-                temp_dir=self._temp_root(),
+                temp_dir=self._data_dir("temp_images"),
             )
             if err or temp_file is None:
                 return fail(err or "无法读取聊天图片。")
@@ -833,8 +832,8 @@ class ArgoPlugin(MaiBotPlugin):
             "只在搜图/反搜结果里看过候选、确认画面后再调用；image_url 填结果条目里的图片直链。\n"
             "图片会进入本工具结果（content_items），随后在 reply 工具里用 attach_pic="
             '"tool_result:<call_id>:1" 发给群友；直接发，不要预告，不要复述发送过程。\n'
-            "reply 返回 success:false（图片没发出去）时，换一张结果图重发；"
-            "没有可换的就只补文字，不解释、不道歉、不说明发送过程。"
+            "reply 返回 success:false（图片没发出去）时，换一张没发过的结果图重发；"
+            "没有可换的就只补文字，不解释、不道歉。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -857,7 +856,7 @@ class ArgoPlugin(MaiBotPlugin):
     ) -> dict[str, Any]:
         image_url = (image_url or "").strip()
         if not self.config.plugin.enabled:
-            return fail("插件未启用")
+            return fail("Argo 检索桥接器已在配置中关闭。")
         if not image_helper.is_public_http_url(image_url):
             return fail("image_url 需要是公网图片直链")
         preview = (preview_url or "").strip() or None
@@ -869,7 +868,7 @@ class ArgoPlugin(MaiBotPlugin):
             preview_url=preview,
             name_prefix="send_img",
             proxy=self.config.argo.proxy,
-            max_base64_bytes=image_helper.MAX_FRAME_BUDGET - 4096,
+            max_base64_bytes=image_helper.MAX_FRAME_BUDGET - image_helper.ENVELOPE_OVERHEAD,
         )
         if not c_item:
             return fail("图片下载失败：该直链暂时取不到，可换一张候选图重试")
@@ -878,7 +877,6 @@ class ArgoPlugin(MaiBotPlugin):
             "content": (
                 "已把这张图片按原分辨率放入本工具结果（content_items）。"
                 '发送：reply 工具 attach_pic="tool_result:<call_id>:1"。'
-                "不要预告、不要复述发送过程。"
             ),
             "content_items": [c_item],
         }
@@ -942,10 +940,7 @@ class ArgoPlugin(MaiBotPlugin):
         mode = str(kwargs.get("mode") or "text").strip().lower()
         if mode not in {"text", "sentiment"}:
             mode = "text"
-        try:
-            want = max(1, min(15, int(kwargs.get("max_results") or 6)))
-        except (TypeError, ValueError):
-            want = 6
+        want = _int_arg(kwargs, "max_results", 6, 1, 15)
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
@@ -1138,7 +1133,7 @@ class ArgoPlugin(MaiBotPlugin):
 
         action = str(kwargs.get("action") or "status").strip().lower()
         stream_id = str(kwargs.get("stream_id") or "")
-        job_root = self._job_root()
+        job_root = self._data_dir("jobs")
 
         if action == "submit":
             task = str(kwargs.get("task") or "").strip()

@@ -11,34 +11,34 @@ import argo_cli
 
 class TestResolveEngine:
     def test_default_kind_maps_to_metaso(self):
-        assert argo_cli.resolve_engine("web", True, "原神 鸣潮 对比") == ("metaso", "")
+        assert argo_cli.resolve_engine("web", True) == ("metaso", "")
 
     def test_unknown_kind_falls_back_to_web(self):
-        assert argo_cli.resolve_engine("不存在", True, "任何词") == ("metaso", "")
+        assert argo_cli.resolve_engine("不存在", True) == ("metaso", "")
 
     def test_empty_kind_falls_back_to_web(self):
-        assert argo_cli.resolve_engine("", True, "任何词") == ("metaso", "")
+        assert argo_cli.resolve_engine("", True) == ("metaso", "")
 
     def test_paid_engine_uses_engine_when_enabled(self):
-        engine, note = argo_cli.resolve_engine("news", True, "今天")
+        engine, note = argo_cli.resolve_engine("news", True)
         assert engine == "deepseek_search"
         assert note == ""
 
     def test_paid_engine_downgrades_when_disabled(self):
-        engine, note = argo_cli.resolve_engine("news", False, "今天")
+        engine, note = argo_cli.resolve_engine("news", False)
         assert engine == "metaso"
         assert "计费源" in note
 
     def test_free_engine_ignores_paid_switch(self):
-        assert argo_cli.resolve_engine("code", False, "maibot 插件") == ("github", "")
+        assert argo_cli.resolve_engine("code", False) == ("github", "")
 
     def test_explicit_engine_overrides_kind(self):
-        engine, note = argo_cli.resolve_engine("web", True, "孤独摇滚", explicit_engine="bangumi")
+        engine, note = argo_cli.resolve_engine("web", True, explicit_engine="bangumi")
         assert engine == "bangumi"
         assert note == ""
 
     def test_explicit_paid_engine_downgrades_when_disabled(self):
-        engine, note = argo_cli.resolve_engine("web", False, "AI news", explicit_engine="tavily")
+        engine, note = argo_cli.resolve_engine("web", False, explicit_engine="tavily")
         assert engine == "metaso"
         assert "计费源" in note
 
@@ -54,7 +54,7 @@ class TestNormalizeMode:
 
     def test_every_kind_resolves_to_a_known_engine(self):
         for kind in argo_cli.ENGINE_MAP:
-            assert argo_cli.resolve_engine(kind, True, "test")[0]
+            assert argo_cli.resolve_engine(kind, True)[0]
 
 
 class TestKindSpec:

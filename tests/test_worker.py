@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from worker import ArgoWorker, sanitize_no_proxy
+from argo_cli import sanitize_no_proxy
+from worker import ArgoWorker
 
 
 def _worker(**kwargs) -> ArgoWorker:

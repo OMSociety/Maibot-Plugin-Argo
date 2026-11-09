@@ -79,6 +79,14 @@ DETACHED_FLAGS = 0x00000008 | 0x00000200 if os.name == "nt" else 0
 # ── 基础工具 ────────────────────────────────────────────────────────────
 
 
+def sanitize_no_proxy(val: str) -> str:
+    """移除 NO_PROXY 中会导致 httpx URL 解析报错的 [::1] 项。"""
+    if not val:
+        return ""
+    parts = [p.strip() for p in val.split(",") if p.strip() and p.strip() != "[::1]"]
+    return ",".join(parts)
+
+
 def build_env(env_file: Path | str | None = None) -> dict[str, str]:
     """复制宿主环境并注入 argo 需要的变量。"""
     env = dict(os.environ)
@@ -88,8 +96,7 @@ def build_env(env_file: Path | str | None = None) -> dict[str, str]:
         env["ARGO_ENV_FILE"] = str(env_file)
     for key in ("NO_PROXY", "no_proxy"):
         if key in env and env[key]:
-            parts = [p.strip() for p in env[key].split(",") if p.strip() and p.strip() != "[::1]"]
-            env[key] = ",".join(parts)
+            env[key] = sanitize_no_proxy(env[key])
     return env
 
 
@@ -114,12 +121,10 @@ def launcher(root: Path) -> Path:
 def resolve_engine(
     kind: str,
     enable_paid: bool,
-    query: str = "",
     *,
     explicit_engine: str = "",
 ) -> tuple[str, str]:
     """返回 (引擎名, 降级说明)。若传了 explicit_engine 则优先采用。"""
-    del query
     exp = (explicit_engine or "").strip().lower()
     if exp and exp != "auto":
         for k, spec in ENGINE_MAP.items():

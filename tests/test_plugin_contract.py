@@ -1,5 +1,6 @@
 """plugin.py 与 image_helper.py 的契约测试：失败字典、工具描述、缓存、SSRF 拦截与图片处理。"""
 
+import ast
 import asyncio
 import inspect
 from base64 import b64encode
@@ -16,12 +17,41 @@ class TestFailContract:
         result = plugin.fail("出问题了")
         assert result == {"success": False, "error": "出问题了", "content": "出问题了"}
 
-    def test_no_failure_dict_is_built_inline(self):
-        source = inspect.getsource(plugin)
-        assert source.count('"success": False') == 1
-        before, _, after = source.partition('"success": False')
-        assert "def fail(" in before
-        assert after.lstrip().startswith(', "error"')
+    def test_only_fail_builds_failure_dict(self):
+        tree = ast.parse(inspect.getsource(plugin))
+        parents = {
+            child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+        }
+
+        def is_failure_dict(node: ast.Dict) -> bool:
+            return any(
+                isinstance(key, ast.Constant)
+                and key.value == "success"
+                and isinstance(value, ast.Constant)
+                and value.value is False
+                for key, value in zip(node.keys, node.values, strict=False)
+            )
+
+        builders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict) or not is_failure_dict(node):
+                continue
+            owner = parents.get(node)
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = parents.get(owner)
+            builders.append(owner.name if owner is not None else None)
+        assert builders == ["fail"]
+
+
+class TestJobWatchConfig:
+    def test_default_watch_window_is_twelve_minutes(self):
+        assert plugin.JobsSection().job_watch_seconds == 720
+
+    def test_watch_window_can_be_overridden(self):
+        config = plugin.ArgoConfig(jobs=plugin.JobsSection(job_watch_seconds=30))
+        assert config.jobs.job_watch_seconds == 30
 
 
 class TestToolDescription:
@@ -64,6 +94,7 @@ class TestImageSearchEngine:
         instance, fake = self._instance()
         asyncio.run(instance.handle_image_search(query="风景"))
         assert fake.calls[0][1]["engine"] == "metaso_image"
+        assert fake.calls[0][1]["mode"] == plugin.argo_cli.DEFAULT_MODE
 
     def test_unknown_engine_is_rejected_before_worker_call(self):
         instance, fake = self._instance()

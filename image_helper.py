@@ -4,7 +4,7 @@
 1. 从聊天上下文取图（三通道：``maisaka.context.resolve_image`` ->
    ``message.get_by_id`` -> ``message.get_recent`` 最近附图消息）；
 2. 将聊天图片落盘到受控暂存目录（供 ``saucenao`` / ``animetrace`` 本地文件反搜）；
-3. 并发下载搜索结果中的图片链接（``image_url`` 或 ``url``），经 Pillow 校验并归一化为
+3. 下载搜索结果中的图片链接（``image_url`` 或 ``url``），经 Pillow 校验并归一化为
    PNG/JPEG Base64，构造 ``content_items`` 供麦麦视觉查看与 ``reply(attach_pic=...)``
    直接发出。
 """
@@ -32,6 +32,8 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 # 宿主插件进程按 16MB 分帧收发（4 字节长度前缀 + JSON），工具结果里的图片全走这一帧；
 # 留出 1MB 给信封、文案与其他字段。
 MAX_FRAME_BUDGET = 15 * 1024 * 1024
+# 单张图片在分帧预算里要扣除的信封开销（JSON 字段名、长度前缀与文案余量）。
+ENVELOPE_OVERHEAD = 4096
 MAX_VISUAL_EDGE = 1600
 # 搜图候选（给模型过目挑选用）：轻量即可，压低上下文与分帧占用；
 # 选中后的发送走原生分辨率，两档互不影响。
@@ -137,14 +139,12 @@ def decode_base64_image(raw_base64: str) -> tuple[str, bytes] | None:
     normalized = str(raw_base64 or "").strip()
     if not normalized:
         return None
-    image_format = "jpeg"
     match = re.match(
         r"^data:image/(?P<fmt>[a-zA-Z0-9.+-]+);base64,(?P<data>.+)$",
         normalized,
         re.DOTALL,
     )
     if match is not None:
-        image_format = match.group("fmt").lower()
         normalized = match.group("data").strip()
     compact = "".join(normalized.split())
     if not compact or not _B64_CHARS_RE.match(compact):
@@ -157,7 +157,7 @@ def decode_base64_image(raw_base64: str) -> tuple[str, bytes] | None:
         return None
     if not looks_like_image(image_bytes):
         return None
-    return _sniff_format(image_bytes) or image_format, image_bytes
+    return _sniff_format(image_bytes), image_bytes
 
 
 def _iter_image_reference_values(value: Any) -> list[str]:
@@ -173,8 +173,6 @@ def _iter_image_reference_values(value: Any) -> list[str]:
         return refs
     text = str(value or "").strip()
     if not text:
-        return []
-    if text.startswith("[") and text.endswith("]") and not text.startswith("[CQ:"):
         return []
     return [text]
 

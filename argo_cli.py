@@ -179,6 +179,8 @@ def search(
     max_results: int = 5,
     mode: str = DEFAULT_MODE,
     timeout: int = 25,
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
     root: str | Path | None = None,
     env_file: str | Path | None = None,
     python: str | None = None,
@@ -200,6 +202,10 @@ def search(
         "--timeout",
         str(max(5, int(timeout))),
     ]
+    if include_domains:
+        argv += ["--include-domains", ",".join(include_domains)]
+    if exclude_domains:
+        argv += ["--exclude-domains", ",".join(exclude_domains)]
     try:
         proc = subprocess.run(
             argv,

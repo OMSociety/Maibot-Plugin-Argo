@@ -201,6 +201,31 @@ class TestSearchFallback:
         assert out["success"] is True
         assert len(fake.calls) == 1
 
+    def test_domain_filters_are_forwarded(self):
+        replies = [{"count": 1, "results": [{"title": "t", "url": "https://example.com"}]}]
+        instance, fake = self._instance(replies)
+        out = asyncio.run(
+            instance.handle_search(
+                query="某政策",
+                kind="news",
+                include_domains=["gov.cn", "news.cn"],
+                exclude_domains=["baijiahao.baidu.com"],
+            )
+        )
+        assert out["success"] is True
+        args = fake.calls[0][1]
+        assert args["include_domains"] == ["gov.cn", "news.cn"]
+        assert args["exclude_domains"] == ["baijiahao.baidu.com"]
+
+    def test_domain_filters_bust_cache(self):
+        replies = [{"count": 1, "results": [{"title": "t", "url": "https://example.com"}]}] * 3
+        instance, fake = self._instance(replies)
+        asyncio.run(instance.handle_search(query="某政策", include_domains=["gov.cn"]))
+        asyncio.run(instance.handle_search(query="某政策", include_domains=["gov.cn"]))
+        assert len(fake.calls) == 1
+        asyncio.run(instance.handle_search(query="某政策", include_domains=["news.cn"]))
+        assert len(fake.calls) == 2
+
 
 class TestImageHelper:
     def test_is_public_http_url_blocks_local_and_private(self):

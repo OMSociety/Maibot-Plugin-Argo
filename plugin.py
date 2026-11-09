@@ -393,6 +393,12 @@ class ArgoPlugin(MaiBotPlugin):
             "- 今天刚出的大事/通报 -> kind=news；日常中文综合冲浪 -> kind=web；\n"
             "  外网英文资讯 -> kind=web_en。\n"
             "若需要直指底层特定引擎，也可填可选参数 engine（填了 engine 会优先于 kind）。\n"
+            "判据补充：\n"
+            "- kind=news（deepseek_search）涉时事、突发或涉外时，自己按领域选定权威来源，"
+            "用 include_domains 限定后重搜；百家号、网易号等聚合洗稿站只当线索，不作事实依据；\n"
+            "- kind=web_en（tavily）只查英文与海外内容，中文 query 不要走它——"
+            "中文摘要截断、索引不稳，常返回营销号与机翻站；\n"
+            "- kind=web（metaso）涉当下的事把年份写进 query，时效衰减弱，旧文会混入。\n"
             "注意：搜图片请调 argo_image_search，以图搜图请调 argo_reverse_image。"
         ),
         parameters=[
@@ -424,6 +430,20 @@ class ArgoPlugin(MaiBotPlugin):
                 required=False,
                 default=5,
             ),
+            ToolParameterInfo(
+                name="include_domains",
+                param_type=ToolParamType.ARRAY,
+                description='仅保留这些域名（含子域）的结果，如 ["gov.cn", "news.cn"]',
+                required=False,
+                default=[],
+            ),
+            ToolParameterInfo(
+                name="exclude_domains",
+                param_type=ToolParamType.ARRAY,
+                description='排除这些域名（含子域）的结果，如 ["baijiahao.baidu.com"]',
+                required=False,
+                default=[],
+            ),
         ],
         visibility="visible",
     )
@@ -443,6 +463,12 @@ class ArgoPlugin(MaiBotPlugin):
             return fail("搜图片请改调专用工具 argo_image_search（支持把图片直接带回给你查看）。")
 
         want = _int_arg(kwargs, "max_results", int(self.config.limits.max_results), 1, 10)
+        include_domains = [
+            str(d).strip().lower() for d in (kwargs.get("include_domains") or []) if str(d).strip()
+        ]
+        exclude_domains = [
+            str(d).strip().lower() for d in (kwargs.get("exclude_domains") or []) if str(d).strip()
+        ]
 
         stream_id = str(kwargs.get("stream_id") or "")
         if not self._rate_ok(stream_id):
@@ -454,7 +480,7 @@ class ArgoPlugin(MaiBotPlugin):
             explicit_engine=explicit_engine,
         )
         mode = argo_cli.normalize_mode(self.config.argo.mode)
-        cache_key = (engine, query, want, mode)
+        cache_key = (engine, query, want, mode, tuple(include_domains), tuple(exclude_domains))
         cached = self._cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
             self._touch(cache_key)
@@ -467,6 +493,8 @@ class ArgoPlugin(MaiBotPlugin):
                 "engine": engine,
                 "max_results": want,
                 "mode": mode,
+                "include_domains": include_domains,
+                "exclude_domains": exclude_domains,
                 "include_local": False,
                 "summary": True,
             },
@@ -481,6 +509,8 @@ class ArgoPlugin(MaiBotPlugin):
                 max_results=want,
                 mode=mode,
                 timeout=int(self.config.argo.timeout_seconds),
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
                 **self._argo_kwargs(),
             )
         if payload.get("error"):
@@ -497,6 +527,8 @@ class ArgoPlugin(MaiBotPlugin):
                     "engine": "metaso",
                     "max_results": want,
                     "mode": mode,
+                    "include_domains": include_domains,
+                    "exclude_domains": exclude_domains,
                     "include_local": False,
                     "summary": True,
                 },

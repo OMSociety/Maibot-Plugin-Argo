@@ -51,6 +51,7 @@
 | `web_en` | `tavily` | 英文网页、海外游戏资讯与外网冲浪 |
 
 > **提示**：除语义 `kind` 外，还可传入可选参数 `engine` 直指任意底层 Argo 引擎；`news` 与 `web_en` 走计费源，`limits.enable_paid` 关闭时自动改用中文综合源 `metaso`。
+> `include_domains` / `exclude_domains` 可按域名（含子域）保留或排除结果，涉时事由麦麦自行选定权威来源，判据见 `argo_search` 工具描述。
 
 ### 2. `argo_image_search`：按关键词搜动漫图、表情包梗图与游戏截图
 

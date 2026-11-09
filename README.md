@@ -57,8 +57,8 @@
 - `engine` 可选 `metaso_image`（通用配图、梗图与游戏截图，默认）或 `pixiv`（Pixiv 公开插画、同人图、漫画与角色立绘）。
 - `pixiv` 按标签检索：`query` 写标签串，空格分隔多个标签（如 `初音ミク 制服`、`東方Project10000users入り フランドール 白タイツ`）；作品名、角色名、题材、服装与收藏夹标签都可用，角色名的日文名与中文名都能命中。
 - Pixiv 支持按画师浏览：`query` 写 `user:<画师 id>`、`画师:<画师名>` 或 `https://www.pixiv.net/users/<id>`，返回该画师的作品列表，后面可接标签收窄（如 `画师:ke-ta フランドール`）；匿名模式下该模式会明确提示需要登录凭证。
-- 插件默认检索 10 条结果、带回 `max_results`（1–8，默认 6）张候选图写入 `content_items`：候选按长边 1024、JPEG q90 压缩，供麦麦快速过目挑选。
-- 选中后用 `argo_send_image` 把那张图按原分辨率重编码带回，再在 `reply` 里用 `attach_pic="tool_result:<call_id>:1"` 发到群聊；单张上限 16MB，超限或取不到原图时改用引擎给的预览直链。作品页作为出处链接。
+- 插件一次会多取一些候选、按内置的候选图预算压缩长边与 JPEG 质量，把 `max_results` 上限内的候选图写入 `content_items`，供麦麦快速过目挑选。
+- 选中后用 `argo_send_image` 把那张图按原分辨率重编码带回，再在 `reply` 里用 `attach_pic="tool_result:<call_id>:1"` 发到群聊；受宿主单帧上限约束，超限或取不到原图时改用引擎给的预览直链。作品页作为出处链接。
 - 麦麦回答到具体角色、作品、画风或物品外观时，可以主动配 1–2 张图，不必等群友开口。
 
 ### 3. `argo_reverse_image`：以图搜图与动漫角色识别
@@ -117,6 +117,7 @@
 | `limits.enable_paid` | `true` | 是否允许调用 `news`（`deepseek_search`）与 `web_en`（`tavily`）计费源 |
 | `jobs.retention_days` | `7` | 作业目录保留天数 |
 | `jobs.max_log_lines` | `20` | 查看状态或唤醒摘要提取的日志尾部行数 |
+| `jobs.job_watch_seconds` | `720` | 提交后台作业后守候完成信号的秒数，超时即停止轮询（默认约 12 分钟） |
 | `jobs.proactive_notify` | `true` | 后台长任务完成后是否自动携带结果摘要唤醒麦麦汇报 |
 
 ---

@@ -15,7 +15,7 @@
 
 | 文件 | 职责 | 改动边界 |
 |---|---|---|
-| `plugin.py` | 宿主接入层：`ArgoConfig` 配置模型、`ArgoPlugin` 生命周期与 6 个 `@Tool`（`argo_search`、`argo_image_search`、`argo_reverse_image`、`argo_social_search`、`argo_fetch`、`argo_job`） | 失败返回统一走 `fail()`（全文件仅 `fail()` 一处构造 `"success": False`） |
+| `plugin.py` | 宿主接入层：`ArgoConfig` 配置模型、`ArgoPlugin` 生命周期与 7 个 `@Tool`（`argo_search`、`argo_image_search`、`argo_reverse_image`、`argo_social_search`、`argo_fetch`、`argo_job`、`argo_send_image`） | 失败返回统一走 `fail()`（全文件仅 `fail()` 一处构造 `"success": False`） |
 | `worker.py` | 常驻 `mcp_server.py` stdio NDJSON 守护进程管理器（预热、请求编号对账、超时/断管自动重启、注入 `ARGO_IMAGE_LOCAL_ROOTS`、剥离 `NO_PROXY` 中的 `[::1]`） | 严禁在宿主进程内直接 `import` Argo 脚本 |
 | `image_helper.py` | 聊天图片三通道提取（`maisaka.context.resolve_image` -> `message.get_by_id` -> `message.get_recent`）、公网 URL SSRF 校验、缩略图下载与 Pillow 归一化、`content_items` 构造 | 本地反搜暂存文件用完即删；严禁把聊天本地图片上传至第三方公共图床 |
 | `argo_cli.py` | 唯一数据源 `ENGINE_MAP`、`REVERSE_IMAGE_ENGINES`、`JOB_TASKS`、结果排版与独立进程作业管理（`submit_job` / `job_status` / `mark_job_notified` / `cancel_job` / `prune_jobs`） | 仅依赖标准库，可脱离宿主单测 |

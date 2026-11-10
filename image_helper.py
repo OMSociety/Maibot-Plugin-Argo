@@ -29,6 +29,8 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
+# 多图消息逐张反搜的上限：常见的 2-4 张连发都能覆盖，超出的用 image_index 指定。
+MAX_BATCH_IMAGES = 4
 # 宿主插件进程按 16MB 分帧收发（4 字节长度前缀 + JSON），工具结果里的图片全走这一帧；
 # 留出 1MB 给信封、文案与其他字段。
 MAX_FRAME_BUDGET = 15 * 1024 * 1024
@@ -195,6 +197,86 @@ def extract_message_images(message: dict[str, Any]) -> list[tuple[str, bytes]]:
                 images.append(decoded)
                 break
     return images
+
+
+def extract_image_descriptions(message: dict[str, Any]) -> list[str]:
+    """按消息内图片顺序取出识别描述；宿主未生成描述的位置留空串。"""
+    raw_message = message.get("raw_message")
+    if not isinstance(raw_message, list):
+        return []
+    descriptions: list[str] = []
+    for component in raw_message:
+        if not isinstance(component, dict):
+            continue
+        if str(component.get("type") or "").strip().lower() not in {"image", "emoji"}:
+            continue
+        text = component.get("content")
+        if not isinstance(text, str) or not text.strip():
+            data = component.get("data")
+            if isinstance(data, str) and not data.startswith(("base64://", "data:", "/9j/")):
+                text = data
+        descriptions.append(" ".join(str(text or "").split()))
+    return descriptions
+
+
+async def list_chat_images(
+    ctx: Any,
+    *,
+    stream_id: str,
+    msg_id: str,
+) -> list[str]:
+    """列出指定消息里每张图的识别描述，不加载图片字节。"""
+    try:
+        response = await ctx.message.get_by_id(
+            msg_id,
+            chat_id=(stream_id or "").strip(),
+            include_binary_data=False,
+        )
+    except Exception as exc:
+        logger.debug("message.get_by_id（只取描述）失败: %s", exc)
+        return []
+    msg_dict = _unwrap_message(response)
+    if msg_dict is None:
+        return []
+    return extract_image_descriptions(msg_dict)
+
+
+def match_image_hint(descriptions: list[str], hint: str) -> int | None:
+    """把自然语言提示匹配到具体图片序号；未命中或并列命中时返回 None。"""
+    needle = " ".join(str(hint or "").casefold().split())
+    if not needle:
+        return None
+    scored: list[tuple[int, int]] = []
+    for idx, description in enumerate(descriptions):
+        text = " ".join(str(description or "").casefold().split())
+        if not text:
+            continue
+        if needle in text or text in needle:
+            return idx
+        scored.append((_longest_common_substring(needle, text), idx))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    best, index = scored[0]
+    if best < 2 or (len(scored) > 1 and scored[1][0] == best):
+        return None
+    return index
+
+
+def _longest_common_substring(left: str, right: str) -> int:
+    """两个短串的最长公共子串长度，用于把「芙兰朵露那张」对到识别描述。"""
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    best = 0
+    for ch in left:
+        current = [0] * (len(right) + 1)
+        for idx, other in enumerate(right, start=1):
+            if ch == other:
+                current[idx] = previous[idx - 1] + 1
+                best = max(best, current[idx])
+        previous = current
+    return best
 
 
 def normalize_image_bytes(

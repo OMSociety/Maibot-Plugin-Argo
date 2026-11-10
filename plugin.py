@@ -72,6 +72,24 @@ def _int_arg(
     return min(hi, value) if hi is not None else value
 
 
+def _optional_index(kwargs: dict[str, Any]) -> int | None:
+    """取图片序号；未传、为空或为负时返回 None，由调用方决定单张还是逐张。"""
+    raw = kwargs.get("image_index")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _clip(text: str, limit: int) -> str:
+    """压缩空白并截断，用于在结果里给人读的图片摘要。"""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
 class PluginSection(PluginConfigBase):
     """插件总开关。"""
 
@@ -724,6 +742,9 @@ class ArgoPlugin(MaiBotPlugin):
             "1. 搜聊天里的图（最常用）：传目标图片所在消息的 msg_id"
             "（留空则自动找当前会话最新一张图），三条引擎都吃得下；\n"
             "2. 搜公网图片链接：直接填 image_url。\n"
+            "同一消息有多张图时，用 image_hint 抄群友原话指定（如『芙兰朵露那张』），"
+            "或传 image_index 指定序号；两者都不传会逐张反搜（最多 4 张）并按图分组返回，"
+            "你按分组结果自行对号入座。\n"
             "插件会把匹配结果首条缩略图放入 content_items 供你亲眼核对与用 attach_pic 发出。\n"
             "相似度不足 90% 的匹配只是相似作品线索，不得断言为同一张图、更不得据此指认作者；"
             "结果里的数字是作品编号，不是画师编号。"
@@ -750,9 +771,22 @@ class ArgoPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="image_index",
                 param_type=ToolParamType.INTEGER,
-                description="同一条消息里第几张图（从 0 开始，默认 0）",
+                description=(
+                    "同一条消息里第几张图（从 0 开始）；不传时：单图直接搜，"
+                    "多图逐张全搜（最多 4 张）"
+                ),
                 required=False,
-                default=0,
+                default=-1,
+            ),
+            ToolParameterInfo(
+                name="image_hint",
+                param_type=ToolParamType.STRING,
+                description=(
+                    "可选：用自然语言说明要搜哪张图（如『芙兰朵露那张』），"
+                    "可照抄群友原话；比序号更稳，多图消息优先用它"
+                ),
+                required=False,
+                default="",
             ),
             ToolParameterInfo(
                 name="image_url",
@@ -782,11 +816,32 @@ class ArgoPlugin(MaiBotPlugin):
             )
 
         msg_id = str(kwargs.get("msg_id") or "").strip()
-        image_index = _int_arg(kwargs, "image_index", 0, 0, None)
+        stream_id = str(kwargs.get("stream_id") or "")
         want = _int_arg(kwargs, "max_results", 5, 1, 8)
 
         raw_url = str(kwargs.get("image_url") or "").strip()
-        stream_id = str(kwargs.get("stream_id") or "")
+        hint = " ".join(str(kwargs.get("image_hint") or "").split())
+        index = _optional_index(kwargs)
+        hint_matched = False
+
+        descriptions: list[str] = []
+        if not raw_url and msg_id:
+            descriptions = await image_helper.list_chat_images(
+                self.ctx, stream_id=stream_id, msg_id=msg_id
+            )
+            if index is None and hint:
+                matched = image_helper.match_image_hint(descriptions, hint)
+                if matched is not None:
+                    index = matched
+                    hint_matched = True
+                elif descriptions:
+                    return fail(self._hint_miss_text(hint, descriptions))
+                else:
+                    hint = ""
+            if index is None and len(descriptions) > 1:
+                return await self._reverse_batch(engine, msg_id, stream_id, descriptions, want)
+
+        image_index = index if index is not None else 0
 
         temp_file: Path | None = None
         if raw_url:
@@ -833,6 +888,11 @@ class ArgoPlugin(MaiBotPlugin):
             max_items=want,
             max_chars=int(self.config.limits.max_chars),
         )
+        if hint_matched and descriptions and 0 <= image_index < len(descriptions):
+            text += (
+                f"\n（按「{hint}」命中图 {image_index}："
+                f"{_clip(descriptions[image_index], 30) or '无识别描述'}）"
+            )
 
         content_items: list[dict[str, Any]] = []
         for item in results:
@@ -858,6 +918,115 @@ class ArgoPlugin(MaiBotPlugin):
                 text + "\n（已将首条匹配缩略图带回你的视觉上下文，核对画面是否一致；"
                 "出处链接以条目中的 url 为准）"
             )
+            out["content_items"] = content_items
+        return out
+
+    @staticmethod
+    def _hint_miss_text(hint: str, descriptions: list[str]) -> str:
+        lines = [
+            f"{idx}. {_clip(desc, 30) or '（无识别描述）'}"
+            for idx, desc in enumerate(descriptions[:8])
+        ]
+        return (
+            f"没有找到与「{hint}」匹配的图片。这条消息里的图：\n"
+            + "\n".join(lines)
+            + "\n可以改用 image_index 指定序号，或把描述里的词抄进 image_hint。"
+        )
+
+    async def _reverse_lookup(
+        self, engine: str, target: str, want: int
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            payload = await self._get_worker().call_tool(
+                "argo_search",
+                {
+                    "query": target,
+                    "engine": engine,
+                    "max_results": want,
+                    "include_local": False,
+                    "summary": False,
+                },
+                timeout=max(30.0, float(self.config.argo.timeout_seconds)),
+            )
+        except Exception as exc:
+            return None, f"反搜失败：{exc}"
+        if payload.get("error"):
+            return None, f"反搜图失败：{payload['error']}"
+        return payload, None
+
+    async def _reverse_chat_image(
+        self, engine: str, msg_id: str, stream_id: str, index: int, want: int
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        temp_file, err = await image_helper.resolve_chat_image_to_file(
+            self.ctx,
+            stream_id=stream_id,
+            msg_id=msg_id,
+            image_index=index,
+            temp_dir=self._data_dir("temp_images"),
+        )
+        if err or temp_file is None:
+            return None, err or "无法读取聊天图片。"
+        try:
+            return await self._reverse_lookup(engine, str(temp_file), want)
+        finally:
+            temp_file.unlink(missing_ok=True)
+
+    async def _reverse_thumb(
+        self, engine: str, payload: dict[str, Any], label: str
+    ) -> dict[str, Any] | None:
+        for item in payload.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            thumb_url = str(item.get("image_url") or "").strip()
+            if not thumb_url:
+                continue
+            title = str(item.get("title") or "反搜匹配预览").strip()
+            src_url = str(item.get("url") or "").strip()
+            c_item = await image_helper.download_image_as_content_item(
+                thumb_url,
+                description=f"{label}[{engine}] 匹配预览：{title}（出处：{src_url}）",
+                preview_url=str(item.get("image_url_preview") or "").strip() or None,
+                name_prefix=f"rev_{engine}",
+                proxy=self.config.argo.proxy,
+            )
+            if c_item is not None:
+                return c_item
+        return None
+
+    async def _reverse_batch(
+        self,
+        engine: str,
+        msg_id: str,
+        stream_id: str,
+        descriptions: list[str],
+        want: int,
+    ) -> dict[str, Any]:
+        total = min(len(descriptions), image_helper.MAX_BATCH_IMAGES)
+        per_chars = max(400, int(self.config.limits.max_chars) // max(total, 1))
+        blocks: list[str] = []
+        content_items: list[dict[str, Any]] = []
+        for idx in range(total):
+            label = f"图 {idx}（{_clip(descriptions[idx], 40) or '无识别描述'}）"
+            payload, err = await self._reverse_chat_image(engine, msg_id, stream_id, idx, want)
+            if err or payload is None:
+                blocks.append(f"{label}：{err or '反搜失败'}")
+                continue
+            text = argo_cli.format_results(payload, max_items=want, max_chars=per_chars)
+            blocks.append(f"{label}：\n{text}")
+            thumb = await self._reverse_thumb(engine, payload, f"[图 {idx}] ")
+            if thumb is not None:
+                content_items.append(thumb)
+        scope = (
+            f"这条消息里的 {len(descriptions)} 张图"
+            if total >= len(descriptions)
+            else f"这条消息里的前 {total} 张图（共 {len(descriptions)} 张）"
+        )
+        out: dict[str, Any] = {
+            "success": True,
+            "content": f"已逐张反搜{scope}，结果按序号分组：\n\n" + "\n\n".join(blocks),
+        }
+        if content_items:
+            out["content"] += "\n（每组的第一条匹配缩略图已放进你的视觉上下文，按序号核对画面）"
             out["content_items"] = content_items
         return out
 

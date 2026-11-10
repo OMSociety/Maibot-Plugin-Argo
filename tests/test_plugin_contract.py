@@ -259,3 +259,104 @@ class TestImageHelper:
         assert len(out_b64) > 20
         assert meta["original_width"] == 64
         assert meta["original_height"] == 48
+
+
+class TestReverseImageSelection:
+    class _FakeWorker:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, name, arguments, timeout=0.0):
+            self.calls.append((name, arguments))
+            return {
+                "count": 1,
+                "results": [
+                    {
+                        "title": "匹配标题",
+                        "url": "https://www.pixiv.net/artworks/1",
+                        "snippet": "作者 X",
+                    }
+                ],
+            }
+
+    DESCRIPTIONS = [
+        "粉色背景下，动漫角色芙兰朵露正悬空浮坐",
+        "两个角色站在沙滩上，穿泳装",
+    ]
+
+    def _instance(self):
+        instance = plugin.ArgoPlugin()
+        instance._plugin_config_instance = type(instance).get_config_model()()
+        fake = self._FakeWorker()
+        instance._get_worker = lambda: fake
+        instance._ctx = object()
+        return instance, fake
+
+    def _patch(self, monkeypatch, tmp_path, descriptions):
+        async def fake_list(ctx, *, stream_id, msg_id):
+            return list(descriptions)
+
+        async def fake_resolve(ctx, *, stream_id, msg_id, image_index, temp_dir):
+            out = tmp_path / f"img_{image_index}.jpg"
+            out.write_bytes(b"\xff\xd8\xff\xe0" + bytes([image_index]) * 8)
+            return out, None
+
+        async def fake_download(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(image_helper, "list_chat_images", fake_list)
+        monkeypatch.setattr(image_helper, "resolve_chat_image_to_file", fake_resolve)
+        monkeypatch.setattr(image_helper, "download_image_as_content_item", fake_download)
+
+    def test_hint_picks_the_matching_image(self, monkeypatch, tmp_path):
+        instance, fake = self._instance()
+        self._patch(monkeypatch, tmp_path, self.DESCRIPTIONS)
+        out = asyncio.run(
+            instance.handle_reverse_image(engine="saucenao", msg_id="m1", image_hint="芙兰朵露那张")
+        )
+        assert out["success"] is True
+        assert len(fake.calls) == 1
+        assert "命中图 0" in out["content"]
+
+    def test_hint_miss_lists_descriptions_without_calling_worker(self, monkeypatch, tmp_path):
+        instance, fake = self._instance()
+        self._patch(monkeypatch, tmp_path, self.DESCRIPTIONS)
+        out = asyncio.run(
+            instance.handle_reverse_image(
+                engine="saucenao", msg_id="m1", image_hint="完全不相干的描述"
+            )
+        )
+        assert out["success"] is False
+        assert fake.calls == []
+        assert "芙兰朵露" in out["error"]
+        assert "image_index" in out["error"]
+
+    def test_multi_image_without_selection_reverses_each(self, monkeypatch, tmp_path):
+        instance, fake = self._instance()
+        self._patch(monkeypatch, tmp_path, self.DESCRIPTIONS)
+        out = asyncio.run(instance.handle_reverse_image(engine="saucenao", msg_id="m1"))
+        assert out["success"] is True
+        assert len(fake.calls) == 2
+        assert "图 0" in out["content"] and "图 1" in out["content"]
+
+    def test_single_image_stays_one_search(self, monkeypatch, tmp_path):
+        instance, fake = self._instance()
+        self._patch(monkeypatch, tmp_path, self.DESCRIPTIONS[:1])
+        out = asyncio.run(instance.handle_reverse_image(engine="saucenao", msg_id="m1"))
+        assert out["success"] is True
+        assert len(fake.calls) == 1
+
+    def test_explicit_index_wins_over_hint(self, monkeypatch, tmp_path):
+        instance, fake = self._instance()
+        self._patch(monkeypatch, tmp_path, self.DESCRIPTIONS)
+        out = asyncio.run(
+            instance.handle_reverse_image(
+                engine="saucenao",
+                msg_id="m1",
+                image_index=1,
+                image_hint="芙兰朵露那张",
+            )
+        )
+        assert out["success"] is True
+        assert len(fake.calls) == 1
+        assert "命中图" not in out["content"]

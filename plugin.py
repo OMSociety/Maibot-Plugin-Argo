@@ -440,6 +440,7 @@ class ArgoPlugin(MaiBotPlugin):
                 description='仅保留这些域名（含子域）的结果，如 ["gov.cn", "news.cn"]',
                 required=False,
                 default=[],
+                items_schema={"type": "string", "description": "域名，如 gov.cn"},
             ),
             ToolParameterInfo(
                 name="exclude_domains",
@@ -447,6 +448,7 @@ class ArgoPlugin(MaiBotPlugin):
                 description='排除这些域名（含子域）的结果，如 ["baijiahao.baidu.com"]',
                 required=False,
                 default=[],
+                items_schema={"type": "string", "description": "域名，如 baijiahao.baidu.com"},
             ),
         ],
         visibility="visible",

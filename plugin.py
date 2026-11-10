@@ -829,7 +829,7 @@ class ArgoPlugin(MaiBotPlugin):
             descriptions = await image_helper.list_chat_images(
                 self.ctx, stream_id=stream_id, msg_id=msg_id
             )
-            if index is None and hint:
+            if index is None and hint and len(descriptions) > 1:
                 matched = image_helper.match_image_hint(descriptions, hint)
                 if matched is not None:
                     index = matched
